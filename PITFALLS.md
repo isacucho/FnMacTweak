@@ -18,4 +18,5 @@
   sesiones background por identificador y sigue entregando al contenedor viejo. Al leer
   trazas, comprobar qué contenedor existe (`ls -ld ~/Library/Containers/<UUID>`).
 - En un proceso macOS sin sandbox `NSHomeDirectory()` ignora `HOME`: los hosts de prueba deben usar
-  `getenv("HOME")` o escriben en el home real (pasó en la prueba de v0.3.2; se limpió).
+  `getenv("HOME")` o escriben en el home real (pasó en las pruebas de v0.2.0, v0.3.0 y v0.3.2: dejaron ~/Documents/moved.bin,
+  ~/Documents/BackgroundHttpTemp y ~/Documents/FortniteGame; se borraron).

@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #include <sys/stat.h>
+#include <cstdlib>
 #include <string>
 #include "Logger.hpp"
 #include "fndiag/config.hpp"
@@ -13,6 +14,12 @@ namespace {
 
 typedef void (*SetResultFn)(id, SEL, long long, BOOL, id, id);
 typedef id (*GetResultFn)(id, SEL, unsigned long long, BOOL *, long long *);
+
+// $HOME/Documents/ del contenedor (HOME = .../Containers/<UUID>/Data).
+NSString *documentsPrefix() {
+    static NSString *prefix = [NSString stringWithFormat:@"%s/Documents/", getenv("HOME") ? getenv("HOME") : [NSHomeDirectory() UTF8String]];
+    return prefix;
+}
 
 std::string objDesc(id o) {
     if (!o)
@@ -62,6 +69,14 @@ void install_engine_hooks() {
                     *outCode = 200;
                     LOG_W("EngHook", "PATCH id=%llu 201->200 size=%lld", dlId, (long long)st.st_size);
                 }
+            }
+            // El motor antepone su directorio base (Library/, luego Documents/) a la ruta que
+            // recibe aqui. Con la ruta absoluta del temporal busca .../Data/Library//Users/...,
+            // no lo encuentra, descarta la descarga y la repite en bucle. Relativa a Documents/
+            // la resuelve bien.
+            if (config().relative_paths && [r isKindOfClass:[NSString class]] && [(NSString *)r hasPrefix:documentsPrefix()]) {
+                r = [(NSString *)r substringFromIndex:[documentsPrefix() length]];
+                LOG_W("EngHook", "REL id=%llu -> %s", dlId, [(NSString *)r UTF8String]);
             }
             @autoreleasepool {
                 LOG_W("EngHook", "GetDownloadResult id=%llu status=%d code=%lld ret=%s", dlId, outStatus ? *outStatus : -1,

@@ -16,6 +16,9 @@ struct Config {
     // Crea el directorio padre cuando el motor mueve una descarga a BackgroundHttp/<build>/
     // y ese directorio no existe (si no, el move falla con ENOENT y la descarga se pierde).
     bool create_dirs = true;
+    // GetDownloadResult devuelve la ruta del temporal relativa a Documents/: el motor le
+    // antepone su directorio base y con la ruta absoluta no encuentra el fichero.
+    bool relative_paths = true;
     // Corrige el 201 que devuelve FBackgroundNSURLSession::GetDownloadResult a 200.
     bool patch_status = true;
     // Registra tambien las descargas que terminan sin error.

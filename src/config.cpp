@@ -27,6 +27,8 @@ void apply(const char *key, const char *value, Config &c) {
         c.isolate_sessions = parse_bool(value, c.isolate_sessions);
     else if (!strcmp(key, "create_dirs"))
         c.create_dirs = parse_bool(value, c.create_dirs);
+    else if (!strcmp(key, "relative_paths"))
+        c.relative_paths = parse_bool(value, c.relative_paths);
     else if (!strcmp(key, "patch_status"))
         c.patch_status = parse_bool(value, c.patch_status);
     else if (!strcmp(key, "verbose"))
@@ -64,6 +66,7 @@ Config load() {
     apply("foreground", getenv("FNDIAG_FOREGROUND"), c);
     apply("isolate_sessions", getenv("FNDIAG_ISOLATE_SESSIONS"), c);
     apply("create_dirs", getenv("FNDIAG_CREATE_DIRS"), c);
+    apply("relative_paths", getenv("FNDIAG_RELATIVE_PATHS"), c);
     apply("patch_status", getenv("FNDIAG_PATCH_STATUS"), c);
     apply("verbose", getenv("FNDIAG_VERBOSE"), c);
     apply("trace_files", getenv("FNDIAG_TRACE_FILES"), c);

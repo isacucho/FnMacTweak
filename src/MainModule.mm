@@ -22,9 +22,10 @@ __attribute__((constructor)) static void initializer() {
         fndiag::log_init(container + "/Documents/FnDiag.log");
 
         const fndiag::Config &cfg = fndiag::config();
-        LOG_I("MainModule", "FnFix v%s cargada (foreground=%d isolate=%d create_dirs=%d patch_status=%d verbose=%d autoupdate=%d)",
-              MODULE_VERSION, cfg.foreground_sessions, cfg.isolate_sessions, cfg.create_dirs, cfg.patch_status, cfg.verbose,
-              cfg.autoupdate);
+        LOG_I("MainModule", "FnFix v%s cargada (foreground=%d isolate=%d create_dirs=%d relative=%d patch_status=%d verbose=%d "
+              "autoupdate=%d)",
+              MODULE_VERSION, cfg.foreground_sessions, cfg.isolate_sessions, cfg.create_dirs, cfg.relative_paths, cfg.patch_status,
+              cfg.verbose, cfg.autoupdate);
 
         fndiag::install_file_hooks();
         fndiag::install_network_hooks();

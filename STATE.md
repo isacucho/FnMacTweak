@@ -1,5 +1,15 @@
 # Estado
 
+## v0.3.3
+- Trazas de v0.3.2 en Fortnite: las descargas ya se mueven bien (21/21) y el parche 201->200
+  actúa, pero el motor antepone su directorio base a la ruta absoluta que devuelve
+  GetDownloadResult y busca `<C>/Library//Users/.../Documents/...tmp` y `<C>/Documents//Users/...`.
+  No encuentra el fichero, la descarga se da por fallida, a los 30 s borra el temporal y repite:
+  bucle de descarga con ESP-CON-000.
+- Fix: `relative_paths` (activo) devuelve la ruta relativa a Documents/ (`FortniteGame/...`), que
+  el motor resuelve bien (así resuelve también las rutas del URLMap). Probado en host macOS con
+  la clase del motor simulada; sin verificar en Fortnite.
+
 ## v0.3.2
 - Trazas de v0.3.1 en Fortnite (contenedor B4254A96, sesiones ya aisladas): la descarga llega
   (lstat rc=0, http 200) pero el motor la mueve a
