@@ -34,6 +34,13 @@ struct Config {
     // Registra las operaciones de fichero sobre temporales de descarga.
     bool trace_files = true;
 #endif
+    // PersistentDownloadDir pasa a ser un enlace a una carpeta fuera del contenedor. Solo
+    // pruebas (beta/dev): en public queda apagado. La sonda de escritura se hace siempre.
+#ifdef PRODUCTION
+    bool persist_downloads = false;
+#else
+    bool persist_downloads = true;
+#endif
     // Comprueba GitHub Releases al arrancar y deja la dylib nueva lista para
     // el siguiente arranque. Desactivado: sustituir una dylib firmada puede
     // invalidar la firma del bundle.

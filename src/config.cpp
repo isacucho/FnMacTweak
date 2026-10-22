@@ -35,6 +35,8 @@ void apply(const char *key, const char *value, Config &c) {
         c.verbose = parse_bool(value, c.verbose);
     else if (!strcmp(key, "trace_files"))
         c.trace_files = parse_bool(value, c.trace_files);
+    else if (!strcmp(key, "persist_downloads"))
+        c.persist_downloads = parse_bool(value, c.persist_downloads);
     else if (!strcmp(key, "mirror_log"))
         c.mirror_log = parse_bool(value, c.mirror_log);
     else if (!strcmp(key, "autoupdate"))
@@ -72,6 +74,7 @@ Config load() {
     apply("patch_status", getenv("FNDIAG_PATCH_STATUS"), c);
     apply("verbose", getenv("FNDIAG_VERBOSE"), c);
     apply("trace_files", getenv("FNDIAG_TRACE_FILES"), c);
+    apply("persist_downloads", getenv("FNDIAG_PERSIST_DOWNLOADS"), c);
     apply("mirror_log", getenv("FNDIAG_MIRROR_LOG"), c);
     apply("autoupdate", getenv("FNDIAG_AUTOUPDATE"), c);
     return c;

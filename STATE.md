@@ -2,6 +2,18 @@
 
 - Proyecto y dylib renombrados a FnMacUpdateFix (antes FnFixUpdate) a partir de v0.3.3.
 
+## v0.5.0
+- Prueba de almacen persistente (`persist_storage.cpp`, `persist_downloads`): la dylib comprueba
+  si el sandbox deja escribir en ~/Library/Application Support/FnMacUpdateFix (si no, en
+  /Users/Shared/FnMacUpdateFix), registra cada intento con su errno y, si funciona, convierte
+  Documents/FortniteGame/PersistentDownloadDir en un enlace a esa carpeta. Mueve el contenido
+  local si el almacen esta vacio; si ambos tienen datos no toca nada. Activo en dev y beta,
+  apagado en public. `FNDIAG_PERSIST_BASE` fuerza otra ruta (pruebas).
+- Probado en macOS con un contenedor simulado: contenedor nuevo, datos locales, conflicto,
+  almacen con datos previos y almacen no escribible. Sin verificar en Fortnite: no se sabe si
+  el sandbox permite escribir fuera del contenedor ni si el motor sigue bien a traves del enlace.
+  El resultado sale en el os_log (`persist: ...`).
+
 ## v0.4.2
 - Trazas v0.4.1 (contenedor 9DCDBCEF, arranque 12:14): el espejo no muestra ChunkHashError ni
   ChunkMissingError; LogIoStoreOnDemand reporta Error=0 y Retry=0 en todo el arranque. Las
