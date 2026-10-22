@@ -25,11 +25,17 @@ Software real (no ejercicio académico): arquitectura modular permitida.
 - Cada carpeta tiene Makefile; el de la raíz delega. Ver `make` en la raíz.
 
 ## Comportamiento
-- Siempre: registra NSError y fichero temporal de cada descarga en
-  `$HOME/Documents/FnDiag.log` (HOME = contenedor de la app).
-- `foreground=1` (por defecto): `backgroundSessionConfigurationWithIdentifier:` devuelve
-  una configuración efímera en proceso. Se apaga con `foreground=0`.
-- Config: variables `FNDIAG_*` o `Documents/FnDiag.conf` (`foreground`, `verbose`, `trace_files`, `autoupdate`).
+- Hooks de observación (siempre): NSError, HTTP y fichero temporal de cada descarga
+  (`network_hooks.cpp`); move/copy/exists de NSFileManager y stat/lstat/access/open/unlink/rename
+  interpuestos con dyld sobre rutas `CFNetworkDownload` o `BackgroundHttp` (`file_hooks.cpp`);
+  `SetDownloadResult`/`GetDownloadResult` de `FBackgroundNSURLSession` (`engine_hooks.mm`).
+  Salen por os_log (subsystem `fndiag`) y por `$HOME/Documents/FnDiag.log`.
+- `patch_status=1` (por defecto): `GetDownloadResult` devuelve 200 en vez de 201 si el temporal
+  existe y no está vacío. Es la configuración que se sabe que funcionaba (NetHook.mm original).
+- `foreground=0` (por defecto): sesiones background intactas. `foreground=1` las cambia por
+  efímeras en proceso (probado en v0.1.0: no bastó por sí solo).
+- Config: variables `FNDIAG_*` o `Documents/FnDiag.conf` con `foreground`, `patch_status`,
+  `verbose`, `trace_files`, `autoupdate`.
 - `autoupdate` (apagado): descarga manifest.json de GitHub Releases, verifica SHA-256 y
   deja la dylib nueva para el siguiente arranque, con `.bak` de la anterior. Sustituye el
   fichero en su misma ruta, así que conserva el nombre de la versión que estaba inyectada.

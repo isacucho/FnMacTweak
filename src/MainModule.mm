@@ -22,11 +22,12 @@ __attribute__((constructor)) static void initializer() {
         fndiag::log_init(container + "/Documents/FnDiag.log");
 
         const fndiag::Config &cfg = fndiag::config();
-        LOG_I("MainModule", "FnFix v%s cargada (foreground=%d verbose=%d autoupdate=%d)", MODULE_VERSION, cfg.foreground_sessions,
-              cfg.verbose, cfg.autoupdate);
+        LOG_I("MainModule", "FnFix v%s cargada (foreground=%d patch_status=%d verbose=%d autoupdate=%d)", MODULE_VERSION,
+              cfg.foreground_sessions, cfg.patch_status, cfg.verbose, cfg.autoupdate);
 
         fndiag::install_file_hooks();
         fndiag::install_network_hooks();
+        fndiag::install_engine_hooks();
         fndiag::install_session_override();
 
         if (cfg.autoupdate) {

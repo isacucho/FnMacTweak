@@ -1,5 +1,13 @@
 # Estado
 
+## v0.3.0
+- Integrado el parche de motor de NetHook.mm (engine_hooks.mm) y los hooks POSIX de ese fichero
+  (file_hooks.cpp). `patch_status` activo y `foreground` apagado por defecto.
+- Probado en un host macOS con una clase FBackgroundNSURLSession simulada: 201 con fichero
+  no vacío pasa a 200; 404 y 201 sin parche no se tocan; las trazas POSIX/NSFileManager salen.
+- Sin verificar en Fortnite.app. No se añadió DebugCanvas.hpp (no está en el repo) ni el
+  constructor de MainModule.cpp (duplicaba el de MainModule.mm).
+
 ## v0.2.0
 - Probado en Fortnite (v0.1.0): la dylib carga, las sesiones pasan a efimeras y los chunks
   se entregan completos (tamaño exacto), sin NSError. Aun asi el juego los marca como

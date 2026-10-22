@@ -23,6 +23,8 @@ bool parse_bool(const char *value, bool fallback) {
 void apply(const char *key, const char *value, Config &c) {
     if (!strcmp(key, "foreground"))
         c.foreground_sessions = parse_bool(value, c.foreground_sessions);
+    else if (!strcmp(key, "patch_status"))
+        c.patch_status = parse_bool(value, c.patch_status);
     else if (!strcmp(key, "verbose"))
         c.verbose = parse_bool(value, c.verbose);
     else if (!strcmp(key, "trace_files"))
@@ -56,6 +58,7 @@ Config load() {
     Config c;
     load_file(c);
     apply("foreground", getenv("FNDIAG_FOREGROUND"), c);
+    apply("patch_status", getenv("FNDIAG_PATCH_STATUS"), c);
     apply("verbose", getenv("FNDIAG_VERBOSE"), c);
     apply("trace_files", getenv("FNDIAG_TRACE_FILES"), c);
     apply("autoupdate", getenv("FNDIAG_AUTOUPDATE"), c);

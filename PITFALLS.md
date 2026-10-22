@@ -11,3 +11,6 @@
 - `Upadter.hpp` (typo) no coincidía con `#import "Updater.hpp"`.
 - El contenedor de la app está protegido por TCC: sin Acceso total al disco el terminal
   recibe "Operation not permitted".
+- Interponer stat/open con dyld: no reservar memoria ni llamar a config() antes de comprobar la
+  ruta (se invocan antes de que libc++ esté inicializado). Con ASan en el host de pruebas
+  crashea al arrancar porque ASan llama a stat dentro del inicializador de libSystem.

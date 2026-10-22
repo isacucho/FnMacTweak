@@ -7,7 +7,11 @@ namespace fndiag {
 struct Config {
     // Sustituye las sesiones NSURLSession "background" por sesiones efimeras
     // en proceso, para no depender de nsurlsessiond.
-    bool foreground_sessions = true;
+    // Apagado por defecto: la configuracion que se sabe que funciona usa sesiones
+    // background y el parche de codigo (patch_status).
+    bool foreground_sessions = false;
+    // Corrige el 201 que devuelve FBackgroundNSURLSession::GetDownloadResult a 200.
+    bool patch_status = true;
     // Registra tambien las descargas que terminan sin error.
     bool verbose = true;
     // Registra las operaciones de fichero sobre temporales de descarga.

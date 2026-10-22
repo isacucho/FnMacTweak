@@ -3,7 +3,12 @@
 #include "fndiag/log.hpp"
 #include "fndiag/objc_util.hpp"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <cerrno>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -15,17 +20,18 @@ using objc::send;
 using objc::sel;
 using objc::to_string;
 
-// Los temporales de NSURLSession se llaman CFNetworkDownload_*.tmp.
-constexpr const char *kMarker = "CFNetworkDownload";
-
 IMP g_move_url = nullptr;
 IMP g_move_path = nullptr;
 IMP g_copy_url = nullptr;
 IMP g_copy_path = nullptr;
+IMP g_exists = nullptr;
+
+// Temporales de NSURLSession (CFNetworkDownload_*.tmp) y carpeta de descargas en segundo
+// plano del motor (BackgroundHttp).
+bool watched(const char *p) { return p && (strstr(p, "CFNetworkDownload") || strstr(p, "BackgroundHttp")); }
+bool watched(const std::string &p) { return watched(p.c_str()); }
 
 std::string url_path(id url) { return url ? to_string(send<id>(url, sel("path"))) : "(nil)"; }
-
-bool interesting(const std::string &path) { return path.find(kMarker) != std::string::npos; }
 
 void log_result(const char *op, const std::string &src, const std::string &dst, bool ok, id error) {
     if (ok) {
@@ -39,54 +45,121 @@ void log_result(const char *op, const std::string &src, const std::string &dst, 
 
 bool hook_move_url(id self, SEL cmd, id src, id dst, id *err) {
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_move_url)(self, cmd, src, dst, err);
-    std::string s = url_path(src);
-    if (interesting(s))
-        log_result("moveItemAtURL", s, url_path(dst), ok, err ? *err : nullptr);
+    std::string s = url_path(src), d = url_path(dst);
+    if (watched(s) || watched(d))
+        log_result("moveItemAtURL", s, d, ok, err ? *err : nullptr);
     return ok;
 }
 
 bool hook_move_path(id self, SEL cmd, id src, id dst, id *err) {
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_move_path)(self, cmd, src, dst, err);
-    std::string s = to_string(src);
-    if (interesting(s))
-        log_result("moveItemAtPath", s, to_string(dst), ok, err ? *err : nullptr);
+    std::string s = to_string(src), d = to_string(dst);
+    if (watched(s) || watched(d))
+        log_result("moveItemAtPath", s, d, ok, err ? *err : nullptr);
     return ok;
 }
 
 bool hook_copy_url(id self, SEL cmd, id src, id dst, id *err) {
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_copy_url)(self, cmd, src, dst, err);
-    std::string s = url_path(src);
-    if (interesting(s))
-        log_result("copyItemAtURL", s, url_path(dst), ok, err ? *err : nullptr);
+    std::string s = url_path(src), d = url_path(dst);
+    if (watched(s) || watched(d))
+        log_result("copyItemAtURL", s, d, ok, err ? *err : nullptr);
     return ok;
 }
 
 bool hook_copy_path(id self, SEL cmd, id src, id dst, id *err) {
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_copy_path)(self, cmd, src, dst, err);
-    std::string s = to_string(src);
-    if (interesting(s))
-        log_result("copyItemAtPath", s, to_string(dst), ok, err ? *err : nullptr);
+    std::string s = to_string(src), d = to_string(dst);
+    if (watched(s) || watched(d))
+        log_result("copyItemAtPath", s, d, ok, err ? *err : nullptr);
     return ok;
+}
+
+bool hook_exists(id self, SEL cmd, id path) {
+    bool r = reinterpret_cast<bool (*)(id, SEL, id)>(g_exists)(self, cmd, path);
+    std::string p = to_string(path);
+    if (watched(p))
+        log_line("fileExistsAtPath exists=%d path=%s", r, p.c_str());
+    return r;
+}
+
+// Registra una llamada POSIX sobre una ruta vigilada conservando errno.
+void trace(const char *op, const char *path, int rc, int saved, const char *extra = "") {
+    // watched() primero: no reserva memoria, y estas funciones pueden llamarse antes de que
+    // libc++ y config() esten inicializados.
+    if (!watched(path) || !config().trace_files)
+        return;
+    log_line("%s rc=%d errno=%d (%s) %s path=%s", op, rc, rc < 0 ? saved : 0, rc < 0 ? strerror(saved) : "ok", extra, path);
 }
 
 } // namespace
 
-// rename() se interpone con dyld: no pasa por NSFileManager (lo usa el codigo C++ del motor).
-extern "C" int fndiag_rename(const char *from, const char *to) {
-    int rc = rename(from, to);
-    int saved = errno;
-    if (config().trace_files && from && strstr(from, kMarker))
-        log_line("rename %s -> %s rc=%d errno=%d (%s)", from, to ? to : "(null)", rc, rc ? saved : 0, rc ? strerror(saved) : "ok");
+// Las funciones POSIX se interponen con dyld: no pasan por NSFileManager (las usa el codigo
+// C++ del motor). No se interponen las llamadas de esta misma dylib.
+extern "C" {
+
+int fndiag_stat(const char *p, struct stat *st) {
+    int rc = stat(p, st), saved = errno;
+    trace("stat", p, rc, saved);
     errno = saved;
     return rc;
 }
+
+int fndiag_lstat(const char *p, struct stat *st) {
+    int rc = lstat(p, st), saved = errno;
+    trace("lstat", p, rc, saved);
+    errno = saved;
+    return rc;
+}
+
+int fndiag_access(const char *p, int mode) {
+    int rc = access(p, mode), saved = errno;
+    trace("access", p, rc, saved);
+    errno = saved;
+    return rc;
+}
+
+int fndiag_open(const char *p, int flags, ...) {
+    int mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = va_arg(ap, int);
+        va_end(ap);
+    }
+    int rc = open(p, flags, mode), saved = errno;
+    trace("open", p, rc, saved);
+    errno = saved;
+    return rc;
+}
+
+int fndiag_unlink(const char *p) {
+    int rc = unlink(p), saved = errno;
+    trace("unlink", p, rc, saved);
+    errno = saved;
+    return rc;
+}
+
+int fndiag_rename(const char *from, const char *to) {
+    int rc = rename(from, to), saved = errno;
+    if (watched(to))
+        trace("rename(dst)", to, rc, saved, from ? from : "(null)");
+    else
+        trace("rename", from, rc, saved, to ? to : "(null)");
+    errno = saved;
+    return rc;
+}
+
+} // extern "C"
 
 struct Interpose {
     const void *replacement;
     const void *original;
 };
+#define FNDIAG_INTERPOSE(fn, orig) {reinterpret_cast<const void *>(fn), reinterpret_cast<const void *>(orig)}
 __attribute__((used, section("__DATA,__interpose"))) static const Interpose g_interpose[] = {
-    {reinterpret_cast<const void *>(fndiag_rename), reinterpret_cast<const void *>(rename)},
+    FNDIAG_INTERPOSE(fndiag_stat, stat),   FNDIAG_INTERPOSE(fndiag_lstat, lstat),   FNDIAG_INTERPOSE(fndiag_access, access),
+    FNDIAG_INTERPOSE(fndiag_open, open),   FNDIAG_INTERPOSE(fndiag_unlink, unlink), FNDIAG_INTERPOSE(fndiag_rename, rename),
 };
 
 void install_file_hooks() {
@@ -97,7 +170,8 @@ void install_file_hooks() {
     bool b = objc::replace_instance_method(cls, "moveItemAtPath:toPath:error:", reinterpret_cast<IMP>(hook_move_path), &g_move_path);
     bool c = objc::replace_instance_method(cls, "copyItemAtURL:toURL:error:", reinterpret_cast<IMP>(hook_copy_url), &g_copy_url);
     bool d = objc::replace_instance_method(cls, "copyItemAtPath:toPath:error:", reinterpret_cast<IMP>(hook_copy_path), &g_copy_path);
-    log_line("file hooks: moveURL=%d movePath=%d copyURL=%d copyPath=%d rename=interpose", a, b, c, d);
+    bool e = objc::replace_instance_method(cls, "fileExistsAtPath:", reinterpret_cast<IMP>(hook_exists), &g_exists);
+    log_line("file hooks: moveURL=%d movePath=%d copyURL=%d copyPath=%d exists=%d posix=interpose", a, b, c, d, e);
 }
 
 } // namespace fndiag
