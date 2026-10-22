@@ -20,3 +20,5 @@
 - En un proceso macOS sin sandbox `NSHomeDirectory()` ignora `HOME`: los hosts de prueba deben usar
   `getenv("HOME")` o escriben en el home real (pasó en las pruebas de v0.2.0, v0.3.0 y v0.3.2: dejaron ~/Documents/moved.bin,
   ~/Documents/BackgroundHttpTemp y ~/Documents/FortniteGame; se borraron).
+- Antes de comparar arranques, comprobar el contenedor de cada pid (rutas `Containers/<UUID>` en
+  las trazas): una reinstalación entre medias explica una descarga completa.
