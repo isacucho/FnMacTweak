@@ -11,8 +11,8 @@ Software real (no ejercicio académico): arquitectura modular permitida.
 - El juego baja chunks con NSURLSession background (LogIOSBackgroundDownload) y
   acaban en `didCompleteWithError` -> `ConnectivityError` en InstallBundleSourceBPS.
 - El log del juego no imprime el NSError. De ahí que la dylib lo registre.
-- Hipótesis sin confirmar: las sesiones background (nsurlsessiond) de una app iOS
-  sideloaded en Mac no entregan bien el fichero (ResponseTempLocation vacío).
+- Causa (v0.3.0): tras reinstalar, nsurlsessiond reconecta las sesiones background del mismo
+  identificador y entrega los ficheros en el contenedor anterior, que ya no existe.
 
 ## Estructura
 - `includes/fndiag/`: API del módulo de diagnóstico (log, hooks, config, objc_util).
@@ -35,6 +35,7 @@ Software real (no ejercicio académico): arquitectura modular permitida.
 - `isolate_sessions=1` (por defecto): el identificador de cada sesión background lleva el UUID
   del contenedor, para que nsurlsessiond no reconecte sesiones de una instalación anterior
   (causa del ESP-CON-000 tras reinstalar con Sideloadly).
+- `isolate_sessions=1` (por defecto): identificador de sesión background + `.<UUID contenedor>`.
 - `foreground=0` (por defecto): sesiones background (con `isolate_sessions`). `foreground=1` las cambia por
   efímeras en proceso (probado en v0.1.0: no bastó por sí solo).
 - Config: variables `FNDIAG_*` o `Documents/FnDiag.conf` con `foreground`, `isolate_sessions`, `patch_status`,

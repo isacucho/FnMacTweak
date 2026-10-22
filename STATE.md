@@ -10,6 +10,14 @@
 - Fix: `isolate_sessions` (activo) añade el UUID del contenedor al identificador de sesión.
   Probado en host macOS; sin verificar en Fortnite.
 
+## v0.3.1
+- Causa encontrada con las trazas de v0.3.0 en Fortnite: cada reinstalación con Sideloadly crea
+  un contenedor nuevo, pero nsurlsessiond reconecta las sesiones background con el mismo
+  identificador y entrega los ficheros en el contenedor anterior (ya borrado). El motor no
+  encuentra el temporal: `SetDownloadResult result=500 temp=(nil)` y NSPOSIXErrorDomain 2.
+- Fix: `isolate_sessions` (activo) añade el UUID del contenedor al identificador de cada sesión
+  background. Probado en host macOS; sin verificar en Fortnite.app.
+
 ## v0.3.0
 - Integrado el parche de motor de NetHook.mm (engine_hooks.mm) y los hooks POSIX de ese fichero
   (file_hooks.cpp). `patch_status` activo y `foreground` apagado por defecto.
