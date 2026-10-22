@@ -31,6 +31,27 @@ IMP g_exists = nullptr;
 bool watched(const char *p) { return p && (strstr(p, "CFNetworkDownload") || strstr(p, "BackgroundHttp")); }
 bool watched(const std::string &p) { return watched(p.c_str()); }
 
+// El motor mueve cada descarga a PersistentDownloadDir/BackgroundHttp/<build>/<id>.tmp sin
+// crear antes <build>/: si falta, el rename falla con ENOENT y la descarga se da por perdida
+// (SetDownloadResult 500). Con create_dirs se crea el directorio padre antes de mover.
+void ensure_parent(const char *dst) {
+    if (!watched(dst) || !config().create_dirs)
+        return;
+    std::string dir(dst);
+    size_t slash = dir.rfind('/');
+    if (slash == std::string::npos || slash == 0)
+        return;
+    dir.resize(slash);
+    struct stat st{};
+    if (stat(dir.c_str(), &st) == 0)
+        return;
+    for (size_t pos = dir.find('/', 1); pos != std::string::npos; pos = dir.find('/', pos + 1))
+        mkdir(dir.substr(0, pos).c_str(), 0755); // EEXIST en los que ya existen
+    int rc = mkdir(dir.c_str(), 0755);
+    int saved = errno;
+    log_line("mkdir -p %s rc=%d errno=%d", dir.c_str(), rc, rc ? saved : 0);
+}
+
 std::string url_path(id url) { return url ? to_string(send<id>(url, sel("path"))) : "(nil)"; }
 
 void log_result(const char *op, const std::string &src, const std::string &dst, bool ok, id error) {
@@ -44,6 +65,7 @@ void log_result(const char *op, const std::string &src, const std::string &dst, 
 }
 
 bool hook_move_url(id self, SEL cmd, id src, id dst, id *err) {
+    ensure_parent(url_path(dst).c_str());
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_move_url)(self, cmd, src, dst, err);
     std::string s = url_path(src), d = url_path(dst);
     if (watched(s) || watched(d))
@@ -52,6 +74,7 @@ bool hook_move_url(id self, SEL cmd, id src, id dst, id *err) {
 }
 
 bool hook_move_path(id self, SEL cmd, id src, id dst, id *err) {
+    ensure_parent(to_string(dst).c_str());
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_move_path)(self, cmd, src, dst, err);
     std::string s = to_string(src), d = to_string(dst);
     if (watched(s) || watched(d))
@@ -141,6 +164,7 @@ int fndiag_unlink(const char *p) {
 }
 
 int fndiag_rename(const char *from, const char *to) {
+    fndiag::ensure_parent(to);
     int rc = rename(from, to), saved = errno;
     if (watched(to))
         trace("rename(dst)", to, rc, saved, from ? from : "(null)");
@@ -163,7 +187,7 @@ __attribute__((used, section("__DATA,__interpose"))) static const Interpose g_in
 };
 
 void install_file_hooks() {
-    if (!config().trace_files)
+    if (!config().trace_files && !config().create_dirs)
         return;
     const char *cls = "NSFileManager";
     bool a = objc::replace_instance_method(cls, "moveItemAtURL:toURL:error:", reinterpret_cast<IMP>(hook_move_url), &g_move_url);

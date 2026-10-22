@@ -1,5 +1,15 @@
 # Estado
 
+## v0.3.2
+- Trazas de v0.3.1 en Fortnite (contenedor B4254A96, sesiones ya aisladas): la descarga llega
+  (lstat rc=0, http 200) pero el motor la mueve a
+  Documents/FortniteGame/PersistentDownloadDir/BackgroundHttp/++Fortnite+Release-42.40/<id>.tmp
+  y ese directorio no existe: rename ENOENT, moveItemAtURL NSCocoaErrorDomain 4,
+  SetDownloadResult 500 temp=(nil). Esta es la causa directa del ESP-CON-000.
+- Fix: `create_dirs` (activo) crea el directorio padre antes del move/rename hacia BackgroundHttp.
+  Reproducido en host macOS: sin fix falla igual (code 4), con fix el move funciona.
+  Sin verificar en Fortnite.
+
 ## v0.3.1
 - Causa encontrada con las trazas de v0.3.0 en Fortnite: Sideloadly crea un contenedor nuevo
   en cada reinstalación (22A48156 -> 9914379E). nsurlsessiond reconecta las sesiones background

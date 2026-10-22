@@ -17,3 +17,5 @@
 - Cada reinstalación con Sideloadly cambia el UUID del contenedor. nsurlsessiond recuerda las
   sesiones background por identificador y sigue entregando al contenedor viejo. Al leer
   trazas, comprobar qué contenedor existe (`ls -ld ~/Library/Containers/<UUID>`).
+- En un proceso macOS sin sandbox `NSHomeDirectory()` ignora `HOME`: los hosts de prueba deben usar
+  `getenv("HOME")` o escriben en el home real (pasó en la prueba de v0.3.2; se limpió).

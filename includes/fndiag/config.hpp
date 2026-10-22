@@ -13,6 +13,9 @@ struct Config {
     // Añade el UUID del contenedor al identificador de cada sesion background, para que
     // nsurlsessiond no reconecte sesiones de una instalacion anterior.
     bool isolate_sessions = true;
+    // Crea el directorio padre cuando el motor mueve una descarga a BackgroundHttp/<build>/
+    // y ese directorio no existe (si no, el move falla con ENOENT y la descarga se pierde).
+    bool create_dirs = true;
     // Corrige el 201 que devuelve FBackgroundNSURLSession::GetDownloadResult a 200.
     bool patch_status = true;
     // Registra tambien las descargas que terminan sin error.
