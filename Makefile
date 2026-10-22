@@ -1,27 +1,36 @@
-# Raiz: delega en includes/, src/ y builds/.
-#   make                 dylib iOS (arm64) en builds/ios/
-#   make PLATFORM=mac    dylib macOS, solo para pruebas locales
-#   make check           compila cada cabecera por separado
-#   make sanitize        macOS, -O0, ASan+UBSan, -Werror (builds/mac-san/)
-#   make package         dylib firmada ad-hoc + manifest.json en builds/release/
+# Raiz: delega en includes/, src/ y builds/. La salida va a builds/<canal>/.
+#   make | make dev        iOS arm64, -O0               builds/dev/
+#   make sanitize          macOS, ASan+UBSan, -O0       builds/dev/
+#   make mac               macOS, para pruebas locales  builds/dev/
+#   make beta              iOS arm64, -O2               builds/beta/
+#   make public            iOS arm64, -O2, PRODUCTION   builds/public/
+#   make package           public (o CHANNEL=beta) firmada ad-hoc + manifest.json en builds/release/
+#   make check             compila cada cabecera por separado
 #   make clean
-VERSION  := $(shell cat VERSION)
-PLATFORM ?= ios
-export VERSION PLATFORM
+.PHONY: all dev sanitize mac beta public package check clean
 
-.PHONY: all check sanitize package clean
+all: dev
 
-all:
-	$(MAKE) -C src
+dev:
+	$(MAKE) -C src CHANNEL=dev
+
+sanitize:
+	$(MAKE) -C src CHANNEL=dev PLATFORM=mac SAN=1
+
+mac:
+	$(MAKE) -C src CHANNEL=dev PLATFORM=mac
+
+beta:
+	$(MAKE) -C src CHANNEL=beta
+
+public:
+	$(MAKE) -C src CHANNEL=public
+
+package: public
+	$(MAKE) -C builds package CHANNEL=public
 
 check:
 	$(MAKE) -C includes check
-
-sanitize:
-	$(MAKE) -C src PLATFORM=mac SAN=1
-
-package: all
-	$(MAKE) -C builds package
 
 clean:
 	$(MAKE) -C builds clean

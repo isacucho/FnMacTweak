@@ -18,8 +18,9 @@ Software real (no ejercicio académico): arquitectura modular permitida.
 - `includes/fndiag/`: API del módulo de diagnóstico (log, hooks, config, objc_util).
 - `includes/Logger.hpp`, `iOSSimulatorContext.hpp`, `Updater.hpp`: código propio de Alex.
 - `src/`: implementación. `MainModule.mm` es el constructor de la dylib.
-- `builds/`: salida con nombre `FnFixUpdate-V<version>.dylib`; ver `builds/README.md`.
-  Solo se versionan su Makefile y su README.
+- `builds/`: solo `dev/`, `beta/`, `public/` y `release/`; ver `builds/README.md`. Nombre
+  `FnFixUpdate-V<version>[-dev|-beta].dylib` (calculado en `common.mk`). Solo se versionan
+  su Makefile y su README.
 - Cada carpeta tiene Makefile; el de la raíz delega. Ver `make` en la raíz.
 
 ## Comportamiento

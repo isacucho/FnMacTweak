@@ -1,20 +1,22 @@
 # builds/
 
 Todo lo que hay aqui lo genera `make` desde la raiz. Solo `Makefile` y este fichero
-se versionan.
+se versionan. Hay cuatro carpetas, una por canal:
 
-```
-builds/
-├── ios/FnFixUpdate-V<version>.dylib       make                  la dylib para Fortnite (arm64, iOS)
-├── mac/FnFixUpdate-V<version>.dylib       make PLATFORM=mac     solo pruebas locales en macOS
-├── mac-san/FnFixUpdate-V<version>.dylib   make sanitize         macOS, -O0, ASan + UBSan
-├── obj/<variante>/                        objetos intermedios (se pueden ignorar)
-└── release/                               make package          lo que se sube a GitHub Releases
-    ├── FnFixUpdate-V<version>.dylib       ios/ firmada ad-hoc
-    └── manifest.json                      version, download_url y sha256
-```
+| Carpeta    | Comando            | Contenido |
+|------------|--------------------|-----------|
+| `dev/`     | `make`             | iOS arm64, `-O0`: `FnFixUpdate-V<version>-dev.dylib` |
+|            | `make sanitize`    | macOS con ASan + UBSan: `...-dev-mac-san.dylib` |
+|            | `make mac`         | macOS para pruebas locales: `...-dev-mac.dylib` |
+| `beta/`    | `make beta`        | iOS arm64, `-O2`, con todos los logs: `FnFixUpdate-V<version>-beta.dylib` |
+| `public/`  | `make public`      | iOS arm64, `-O2`, `PRODUCTION` (sin LOG_D/LOG_I): `FnFixUpdate-V<version>.dylib` |
+| `release/` | `make package`     | lo que se sube a GitHub Releases: la dylib de `public/` firmada ad-hoc y `manifest.json` |
 
-La version sale del fichero `VERSION` de la raiz. Para inyectar en Fortnite.app usa el
-de `release/` (o el de `ios/`: es el mismo salvo la firma ad-hoc).
+`make package CHANNEL=beta` empaqueta la beta (para un prerelease). Los objetos
+intermedios estan en `<canal>/.obj/` (carpeta oculta).
 
-`make clean` borra todo menos `Makefile` y este fichero.
+La version sale del fichero `VERSION` de la raiz. El nombre y el canal se calculan en
+`common.mk`. Para probar en Fortnite.app inyecta la de `beta/` (o la de `dev/`);
+la de `public/` es la que se publica.
+
+`make clean` borra las cuatro carpetas.

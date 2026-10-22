@@ -1,39 +1,38 @@
-# Compila las fuentes y enlaza la dylib en ../builds/<variante>/.
-VERSION  ?= $(shell cat ../VERSION)
-PLATFORM ?= ios
-# SAN=1: -O0 + ASan/UBSan (solo tiene sentido con PLATFORM=mac: la runtime de
-# ASan no existe dentro de Fortnite.app).
-SAN      ?= 0
+# Compila las fuentes y enlaza la dylib en ../builds/<canal>/ (ver ../common.mk).
+include ../common.mk
 
 ifeq ($(PLATFORM),ios)
   SDKNAME := iphoneos
   TARGET  := arm64-apple-ios17.0
-else ifeq ($(PLATFORM),mac)
+else
   SDKNAME := macosx
   TARGET  := arm64-apple-macos13.0
-else
-  $(error PLATFORM debe ser ios o mac)
 endif
 
 SDK     := $(shell xcrun --sdk $(SDKNAME) --show-sdk-path)
 CXX     := xcrun --sdk $(SDKNAME) clang++
+
+# dev: -O0. SAN=1 (solo macOS): ASan/UBSan, sin recuperacion. public: define PRODUCTION
+# (Logger.hpp silencia LOG_D/LOG_I). beta y public: -O2.
+OPT      := -O2
+SANFLAGS :=
+DEFINES  := -DMODULE_VERSION=\"$(VERSION)\"
+ifeq ($(CHANNEL),dev)
+  OPT := -O0
+endif
 ifeq ($(SAN),1)
-  OPT     := -O0
   SANFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all
-  VARIANT := $(PLATFORM)-san
-else
-  OPT     := -O2
-  SANFLAGS :=
-  VARIANT := $(PLATFORM)
+endif
+ifeq ($(CHANNEL),public)
+  DEFINES += -DPRODUCTION
 endif
 
-# builds/<variante>/FnFixUpdate-V<version>.dylib ; objetos en builds/obj/<variante>/
-NAME    := FnFixUpdate-V$(VERSION).dylib
-OUTDIR  := ../builds/$(VARIANT)
-OBJDIR  := ../builds/obj/$(VARIANT)
+# builds/<canal>/<NAME> ; objetos en builds/<canal>/.obj/<plataforma>/
+OUTDIR  := ../builds/$(CHANNEL)
+OBJDIR  := $(OUTDIR)/.obj/$(PLATFORM)$(if $(filter 1,$(SAN)),-san)
 OUT     := $(OUTDIR)/$(NAME)
 
-COMMON  := -target $(TARGET) -isysroot $(SDK) -I../includes -DMODULE_VERSION=\"$(VERSION)\" \
+COMMON  := -target $(TARGET) -isysroot $(SDK) -I../includes $(DEFINES) \
            -std=c++17 $(OPT) -g -Wall -Wextra -Werror $(SANFLAGS) -fvisibility=hidden -MMD -MP
 OBJCXX  := -x objective-c++ -fobjc-arc
 LDFLAGS := -target $(TARGET) -isysroot $(SDK) -dynamiclib \
