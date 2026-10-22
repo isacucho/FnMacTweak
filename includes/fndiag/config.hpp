@@ -21,10 +21,16 @@ struct Config {
     bool relative_paths = true;
     // Corrige el 201 que devuelve FBackgroundNSURLSession::GetDownloadResult a 200.
     bool patch_status = true;
+#ifdef PRODUCTION
+    // public: solo errores. Los arreglos (create_dirs, relative_paths...) siguen activos.
+    bool verbose = false;
+    bool trace_files = false;
+#else
     // Registra tambien las descargas que terminan sin error.
     bool verbose = true;
     // Registra las operaciones de fichero sobre temporales de descarga.
     bool trace_files = true;
+#endif
     // Comprueba GitHub Releases al arrancar y deja la dylib nueva lista para
     // el siguiente arranque. Desactivado: sustituir una dylib firmada puede
     // invalidar la firma del bundle.

@@ -58,18 +58,8 @@ private:
         std::lock_guard<std::mutex> lock(m_mutex);
 
         // os_log + Documents/FnDiag.log (si log_init abrio el fichero)
-        fndiag::log_line("[%s] %s", tag.c_str(), msg);
-        writeLogHeader(level, tag);
-        std::cout << msg << std::endl;
-    }
-
-    void writeLogHeader(LogLevel level, const std::string& tag) {
-        auto now = std::chrono::system_clock::now();
-        std::time_t time_val = std::chrono::system_clock::to_time_t(now);
-        std::tm tm_buf;
-        localtime_r(&time_val, &tm_buf);
-        std::cout << "[" << std::put_time(&tm_buf, "%H:%M:%S") << "] ";
-        std::cout << "[" << getLevelString(level) << "] [" << tag << "] ";
+        // std::cout no llega a ningun sitio en una app grafica: solo os_log + fichero.
+        fndiag::log_line("[%s] [%s] %s", getLevelString(level), tag.c_str(), msg);
     }
 
     const char* getLevelString(LogLevel level) {

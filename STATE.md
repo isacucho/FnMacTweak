@@ -2,6 +2,17 @@
 
 - Proyecto y dylib renombrados a FnMacUpdateFix (antes FnFixUpdate) a partir de v0.3.3.
 
+## v0.4.0
+- v0.3.3 confirmada en Fortnite: sin ESP-CON-000, descarga completa y se llega al lobby.
+- Optimización de la dylib: GetDownloadResult ya no registra el sondeo del motor
+  (~50 llamadas/s con status=0: 23.761 de 28.067 líneas en 8,5 min); Logger deja de
+  escribir a std::cout; las funciones POSIX interpuestas usan flags cacheados en vez de
+  config(); copy/exists de NSFileManager solo se enganchan con trazas. En public
+  (PRODUCTION) verbose y trace_files van apagados por defecto; los arreglos siguen activos.
+- Descargas medidas (nsurlsessiond, h3): 166/176 tareas ok. Una conexión QUIC se quedó a
+  0 kbps 62 s; el motor canceló sus tareas y reintentó ~1 min después. Tras relanzar el
+  juego se volvieron a bajar los mismos chunks (~3,5 GB por arranque). Pendiente.
+
 ## v0.3.3
 - Trazas de v0.3.2 en Fortnite: las descargas ya se mueven bien (21/21) y el parche 201->200
   actúa, pero el motor antepone su directorio base a la ruta absoluta que devuelve
