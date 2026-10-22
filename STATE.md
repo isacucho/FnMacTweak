@@ -6,6 +6,10 @@
   configuración efímera, se registran NSError (-999, -1003) y la descarga correcta
   (fichero temporal, tamaño, HTTP 200).
 
+- Flags: `-Wall -Wextra -Werror` siempre. `make sanitize` (macOS, -O0, ASan+UBSan,
+  `-fno-sanitize-recover=all`, salida en builds/mac-san/) pasa sin errores en el host
+  de prueba, incluido el camino de error 404 del Updater (repo privado).
+
 ## Sin verificar
 - Que la dylib cargue dentro de Fortnite.app tras inyectarla y re-firmar.
 - Que `foreground=1` elimine el ESP-CON-000. Si no, el NSError de FnDiag.log dice el motivo.

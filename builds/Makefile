@@ -19,4 +19,4 @@ package:
 	@cat $(REL)/manifest.json
 
 clean:
-	rm -rf ios mac $(REL)
+	rm -rf ios mac mac-san $(REL)

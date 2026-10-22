@@ -1,6 +1,9 @@
 # Compila las fuentes y enlaza la dylib en ../builds/$(PLATFORM)/.
 VERSION  ?= $(shell cat ../VERSION)
 PLATFORM ?= ios
+# SAN=1: -O0 + ASan/UBSan (solo tiene sentido con PLATFORM=mac: la runtime de
+# ASan no existe dentro de Fortnite.app).
+SAN      ?= 0
 
 ifeq ($(PLATFORM),ios)
   SDKNAME := iphoneos
@@ -14,16 +17,24 @@ endif
 
 SDK     := $(shell xcrun --sdk $(SDKNAME) --show-sdk-path)
 CXX     := xcrun --sdk $(SDKNAME) clang++
-OUTDIR  := ../builds/$(PLATFORM)
+ifeq ($(SAN),1)
+  OPT     := -O0
+  SANFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all
+  OUTDIR  := ../builds/$(PLATFORM)-san
+else
+  OPT     := -O2
+  SANFLAGS :=
+  OUTDIR  := ../builds/$(PLATFORM)
+endif
 OBJDIR  := $(OUTDIR)/obj
 OUT     := $(OUTDIR)/FnFix.dylib
 
 COMMON  := -target $(TARGET) -isysroot $(SDK) -I../includes -DMODULE_VERSION=\"$(VERSION)\" \
-           -std=c++17 -O2 -g -Wall -Wextra -fvisibility=hidden -MMD -MP
+           -std=c++17 $(OPT) -g -Wall -Wextra -Werror $(SANFLAGS) -fvisibility=hidden -MMD -MP
 OBJCXX  := -x objective-c++ -fobjc-arc
 LDFLAGS := -target $(TARGET) -isysroot $(SDK) -dynamiclib \
            -install_name @executable_path/Frameworks/FnFix.dylib \
-           -framework Foundation -framework CoreFoundation
+           $(SANFLAGS) -framework Foundation -framework CoreFoundation
 
 CPP_SRC := $(wildcard *.cpp)
 MM_SRC  := $(wildcard *.mm)
