@@ -46,5 +46,5 @@ Software real (no ejercicio académico): arquitectura modular permitida.
 
 ## Releases y rollback
 Cada versión es una Release con `FnFixUpdate-V<version>.dylib` y `manifest.json`
-(hasta v0.2.0 el asset se llamaba `FnFix.dylib`). Para volver atrás:
+(v0.1.0 y v0.2.0 se renombraron después; su install_name interno sigue siendo `FnFix.dylib`). Para volver atrás:
 descargar la dylib de la Release anterior y reinyectarla con Sideloadly.
