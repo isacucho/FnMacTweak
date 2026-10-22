@@ -18,7 +18,8 @@ Software real (no ejercicio académico): arquitectura modular permitida.
 - `includes/fndiag/`: API del módulo de diagnóstico (log, hooks, config, objc_util).
 - `includes/Logger.hpp`, `iOSSimulatorContext.hpp`, `Updater.hpp`: código propio de Alex.
 - `src/`: implementación. `MainModule.mm` es el constructor de la dylib.
-- `builds/`: salida (`ios/`, `mac/`, `release/`), no se versiona salvo su Makefile.
+- `builds/`: salida con nombre `FnFixUpdate-V<version>.dylib`; ver `builds/README.md`.
+  Solo se versionan su Makefile y su README.
 - Cada carpeta tiene Makefile; el de la raíz delega. Ver `make` en la raíz.
 
 ## Comportamiento
@@ -26,10 +27,12 @@ Software real (no ejercicio académico): arquitectura modular permitida.
   `$HOME/Documents/FnDiag.log` (HOME = contenedor de la app).
 - `foreground=1` (por defecto): `backgroundSessionConfigurationWithIdentifier:` devuelve
   una configuración efímera en proceso. Se apaga con `foreground=0`.
-- Config: variables `FNDIAG_*` o `Documents/FnDiag.conf` (`foreground`, `verbose`, `autoupdate`).
+- Config: variables `FNDIAG_*` o `Documents/FnDiag.conf` (`foreground`, `verbose`, `trace_files`, `autoupdate`).
 - `autoupdate` (apagado): descarga manifest.json de GitHub Releases, verifica SHA-256 y
-  deja la dylib nueva para el siguiente arranque, con `.bak` de la anterior.
+  deja la dylib nueva para el siguiente arranque, con `.bak` de la anterior. Sustituye el
+  fichero en su misma ruta, así que conserva el nombre de la versión que estaba inyectada.
 
 ## Releases y rollback
-Cada versión es una Release con `FnFix.dylib` y `manifest.json`. Para volver atrás:
+Cada versión es una Release con `FnFixUpdate-V<version>.dylib` y `manifest.json`
+(hasta v0.2.0 el asset se llamaba `FnFix.dylib`). Para volver atrás:
 descargar la dylib de la Release anterior y reinyectarla con Sideloadly.

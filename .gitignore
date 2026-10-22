@@ -1,6 +1,5 @@
 .DS_Store
 sessions/
-builds/ios/
-builds/mac/
-builds/release/
-builds/mac-san/
+builds/*
+!builds/Makefile
+!builds/README.md

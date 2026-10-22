@@ -1,4 +1,4 @@
-# Compila las fuentes y enlaza la dylib en ../builds/$(PLATFORM)/.
+# Compila las fuentes y enlaza la dylib en ../builds/<variante>/.
 VERSION  ?= $(shell cat ../VERSION)
 PLATFORM ?= ios
 # SAN=1: -O0 + ASan/UBSan (solo tiene sentido con PLATFORM=mac: la runtime de
@@ -20,20 +20,24 @@ CXX     := xcrun --sdk $(SDKNAME) clang++
 ifeq ($(SAN),1)
   OPT     := -O0
   SANFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all
-  OUTDIR  := ../builds/$(PLATFORM)-san
+  VARIANT := $(PLATFORM)-san
 else
   OPT     := -O2
   SANFLAGS :=
-  OUTDIR  := ../builds/$(PLATFORM)
+  VARIANT := $(PLATFORM)
 endif
-OBJDIR  := $(OUTDIR)/obj
-OUT     := $(OUTDIR)/FnFix.dylib
+
+# builds/<variante>/FnFixUpdate-V<version>.dylib ; objetos en builds/obj/<variante>/
+NAME    := FnFixUpdate-V$(VERSION).dylib
+OUTDIR  := ../builds/$(VARIANT)
+OBJDIR  := ../builds/obj/$(VARIANT)
+OUT     := $(OUTDIR)/$(NAME)
 
 COMMON  := -target $(TARGET) -isysroot $(SDK) -I../includes -DMODULE_VERSION=\"$(VERSION)\" \
            -std=c++17 $(OPT) -g -Wall -Wextra -Werror $(SANFLAGS) -fvisibility=hidden -MMD -MP
 OBJCXX  := -x objective-c++ -fobjc-arc
 LDFLAGS := -target $(TARGET) -isysroot $(SDK) -dynamiclib \
-           -install_name @executable_path/Frameworks/FnFix.dylib \
+           -install_name @executable_path/Frameworks/$(NAME) \
            $(SANFLAGS) -framework Foundation -framework CoreFoundation
 
 CPP_SRC := $(wildcard *.cpp)
@@ -42,7 +46,7 @@ OBJS    := $(addprefix $(OBJDIR)/,$(CPP_SRC:.cpp=.o) $(MM_SRC:.mm=.o))
 
 all: $(OUT)
 
-$(OUT): $(OBJS)
+$(OUT): $(OBJS) | $(OUTDIR)
 	$(CXX) $(LDFLAGS) $^ -o $@
 
 $(OBJDIR)/%.o: %.cpp | $(OBJDIR)
@@ -51,7 +55,7 @@ $(OBJDIR)/%.o: %.cpp | $(OBJDIR)
 $(OBJDIR)/%.o: %.mm | $(OBJDIR)
 	$(CXX) $(COMMON) $(OBJCXX) -c $< -o $@
 
-$(OBJDIR):
+$(OBJDIR) $(OUTDIR):
 	mkdir -p $@
 
 -include $(OBJS:.o=.d)
