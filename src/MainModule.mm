@@ -31,6 +31,8 @@ __attribute__((constructor)) static void initializer() {
         fndiag::install_network_hooks();
         fndiag::install_engine_hooks();
         fndiag::install_session_override();
+        if (cfg.mirror_log)
+            fndiag::start_game_log_mirror(container);
 
         if (cfg.autoupdate) {
             Updater::getInstance().setUpdateConfig(UPDATE_MANIFEST_URL, MODULE_VERSION);

@@ -2,6 +2,16 @@
 
 - Proyecto y dylib renombrados a FnMacUpdateFix (antes FnFixUpdate) a partir de v0.3.3.
 
+## v0.4.1
+- Re-descarga confirmada: el segundo arranque en el mismo contenedor (B4254A96) bajó los
+  mismos 82 chunks (4,75 GB). Strings del binario: InstallBundleSourceBPS tiene
+  CheckForAlreadyDownloadedFiles y JournalManifestArchive; "Skipping JournalManifest Update
+  ... access timestamp was too recent" es candidato a causa (sin confirmar).
+- El terminal no puede leer el contenedor nuevo (TCC por contenedor). Nuevo espejo de
+  diagnóstico (`mirror_log`, beta/dev): desde dentro del juego vuelca el estado de
+  PersistentDownloadDir y reenvía al os_log las líneas relevantes de FortniteGame.log y del
+  log del arranque anterior ([InstallState], [GameLog], [PrevLog]). Apagado en public.
+
 ## v0.4.0
 - v0.3.3 confirmada en Fortnite: sin ESP-CON-000, descarga completa y se llega al lobby.
 - Optimización de la dylib: GetDownloadResult ya no registra el sondeo del motor

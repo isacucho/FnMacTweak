@@ -25,7 +25,10 @@ struct Config {
     // public: solo errores. Los arreglos (create_dirs, relative_paths...) siguen activos.
     bool verbose = false;
     bool trace_files = false;
+    bool mirror_log = false;
 #else
+    // Espejo de FortniteGame.log y del estado de instalacion en el os_log (diagnostico).
+    bool mirror_log = true;
     // Registra tambien las descargas que terminan sin error.
     bool verbose = true;
     // Registra las operaciones de fichero sobre temporales de descarga.
