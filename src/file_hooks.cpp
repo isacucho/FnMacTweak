@@ -26,11 +26,6 @@ IMP g_copy_url = nullptr;
 IMP g_copy_path = nullptr;
 IMP g_exists = nullptr;
 
-// Se fijan en install_file_hooks(). Antes de eso las funciones interpuestas solo hacen la
-// llamada original: no tocan config() ni reservan memoria (libc++ puede no estar listo).
-bool g_trace = false;
-bool g_dirs = false;
-
 // Temporales de NSURLSession (CFNetworkDownload_*.tmp) y carpeta de descargas en segundo
 // plano del motor (BackgroundHttp).
 bool watched(const char *p) { return p && (strstr(p, "CFNetworkDownload") || strstr(p, "BackgroundHttp")); }
@@ -40,7 +35,7 @@ bool watched(const std::string &p) { return watched(p.c_str()); }
 // crear antes <build>/: si falta, el rename falla con ENOENT y la descarga se da por perdida
 // (SetDownloadResult 500). Con create_dirs se crea el directorio padre antes de mover.
 void ensure_parent(const char *dst) {
-    if (!g_dirs || !watched(dst))
+    if (!watched(dst) || !config().create_dirs)
         return;
     std::string dir(dst);
     size_t slash = dir.rfind('/');
@@ -73,7 +68,7 @@ bool hook_move_url(id self, SEL cmd, id src, id dst, id *err) {
     ensure_parent(url_path(dst).c_str());
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_move_url)(self, cmd, src, dst, err);
     std::string s = url_path(src), d = url_path(dst);
-    if (g_trace && (watched(s) || watched(d)))
+    if (watched(s) || watched(d))
         log_result("moveItemAtURL", s, d, ok, err ? *err : nullptr);
     return ok;
 }
@@ -82,7 +77,7 @@ bool hook_move_path(id self, SEL cmd, id src, id dst, id *err) {
     ensure_parent(to_string(dst).c_str());
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_move_path)(self, cmd, src, dst, err);
     std::string s = to_string(src), d = to_string(dst);
-    if (g_trace && (watched(s) || watched(d)))
+    if (watched(s) || watched(d))
         log_result("moveItemAtPath", s, d, ok, err ? *err : nullptr);
     return ok;
 }
@@ -90,7 +85,7 @@ bool hook_move_path(id self, SEL cmd, id src, id dst, id *err) {
 bool hook_copy_url(id self, SEL cmd, id src, id dst, id *err) {
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_copy_url)(self, cmd, src, dst, err);
     std::string s = url_path(src), d = url_path(dst);
-    if (g_trace && (watched(s) || watched(d)))
+    if (watched(s) || watched(d))
         log_result("copyItemAtURL", s, d, ok, err ? *err : nullptr);
     return ok;
 }
@@ -98,7 +93,7 @@ bool hook_copy_url(id self, SEL cmd, id src, id dst, id *err) {
 bool hook_copy_path(id self, SEL cmd, id src, id dst, id *err) {
     bool ok = reinterpret_cast<bool (*)(id, SEL, id, id, id *)>(g_copy_path)(self, cmd, src, dst, err);
     std::string s = to_string(src), d = to_string(dst);
-    if (g_trace && (watched(s) || watched(d)))
+    if (watched(s) || watched(d))
         log_result("copyItemAtPath", s, d, ok, err ? *err : nullptr);
     return ok;
 }
@@ -113,7 +108,9 @@ bool hook_exists(id self, SEL cmd, id path) {
 
 // Registra una llamada POSIX sobre una ruta vigilada conservando errno.
 void trace(const char *op, const char *path, int rc, int saved, const char *extra = "") {
-    if (!g_trace || !watched(path))
+    // watched() primero: no reserva memoria, y estas funciones pueden llamarse antes de que
+    // libc++ y config() esten inicializados.
+    if (!watched(path) || !config().trace_files)
         return;
     log_line("%s rc=%d errno=%d (%s) %s path=%s", op, rc, rc < 0 ? saved : 0, rc < 0 ? strerror(saved) : "ok", extra, path);
 }
@@ -190,22 +187,15 @@ __attribute__((used, section("__DATA,__interpose"))) static const Interpose g_in
 };
 
 void install_file_hooks() {
-    g_trace = config().trace_files;
-    g_dirs = config().create_dirs;
-    if (!g_trace && !g_dirs)
+    if (!config().trace_files && !config().create_dirs)
         return;
     const char *cls = "NSFileManager";
-    // move: create_dirs y trazas. copy y exists: solo trazas.
     bool a = objc::replace_instance_method(cls, "moveItemAtURL:toURL:error:", reinterpret_cast<IMP>(hook_move_url), &g_move_url);
     bool b = objc::replace_instance_method(cls, "moveItemAtPath:toPath:error:", reinterpret_cast<IMP>(hook_move_path), &g_move_path);
-    bool c = false, d = false, e = false;
-    if (g_trace) {
-        c = objc::replace_instance_method(cls, "copyItemAtURL:toURL:error:", reinterpret_cast<IMP>(hook_copy_url), &g_copy_url);
-        d = objc::replace_instance_method(cls, "copyItemAtPath:toPath:error:", reinterpret_cast<IMP>(hook_copy_path), &g_copy_path);
-        e = objc::replace_instance_method(cls, "fileExistsAtPath:", reinterpret_cast<IMP>(hook_exists), &g_exists);
-    }
-    log_line("file hooks: trace=%d create_dirs=%d moveURL=%d movePath=%d copyURL=%d copyPath=%d exists=%d", g_trace, g_dirs, a, b, c, d,
-             e);
+    bool c = objc::replace_instance_method(cls, "copyItemAtURL:toURL:error:", reinterpret_cast<IMP>(hook_copy_url), &g_copy_url);
+    bool d = objc::replace_instance_method(cls, "copyItemAtPath:toPath:error:", reinterpret_cast<IMP>(hook_copy_path), &g_copy_path);
+    bool e = objc::replace_instance_method(cls, "fileExistsAtPath:", reinterpret_cast<IMP>(hook_exists), &g_exists);
+    log_line("file hooks: moveURL=%d movePath=%d copyURL=%d copyPath=%d exists=%d posix=interpose", a, b, c, d, e);
 }
 
 } // namespace fndiag

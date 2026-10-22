@@ -32,8 +32,6 @@ Software real (no ejercicio académico): arquitectura modular permitida.
   Salen por os_log (subsystem `fndiag`) y por `$HOME/Documents/FnDiag.log`.
 - `patch_status=1` (por defecto): `GetDownloadResult` devuelve 200 en vez de 201 si el temporal
   existe y no está vacío. Es la configuración que se sabe que funcionaba (NetHook.mm original).
-- `persist_downloads` (beta/dev: 1, public: 0): `PersistentDownloadDir` pasa a enlace a
-  ~/Library/Application Support/FnMacUpdateFix para sobrevivir a reinstalar (prueba, v0.5.0).
 - `relative_paths=1` (por defecto): `GetDownloadResult` devuelve la ruta del temporal relativa a
   `Documents/`; con la absoluta el motor la duplica y no encuentra la descarga (bucle).
 - `create_dirs=1` (por defecto): crea `PersistentDownloadDir/BackgroundHttp/<build>/` si falta

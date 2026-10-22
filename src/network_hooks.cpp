@@ -60,8 +60,6 @@ void log_completion(id task, id error) {
 }
 
 void log_download_finished(id task, id location) {
-    if (!config().verbose)
-        return;
     std::string path = location ? to_string(send<id>(location, sel("path"))) : "(nil)";
     struct stat st{};
     bool exists = location && stat(path.c_str(), &st) == 0;
@@ -73,8 +71,6 @@ void log_download_finished(id task, id location) {
 
 // Tras volver el delegado: si el temporal sigue ahi, el juego no lo movio.
 void log_after_delegate(id task, id location) {
-    if (!config().verbose)
-        return;
     std::string path = location ? to_string(send<id>(location, sel("path"))) : "(nil)";
     struct stat st{};
     bool exists = location && stat(path.c_str(), &st) == 0;
