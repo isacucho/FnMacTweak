@@ -25,6 +25,7 @@ __attribute__((constructor)) static void initializer() {
         LOG_I("MainModule", "FnFix v%s cargada (foreground=%d verbose=%d autoupdate=%d)", MODULE_VERSION, cfg.foreground_sessions,
               cfg.verbose, cfg.autoupdate);
 
+        fndiag::install_file_hooks();
         fndiag::install_network_hooks();
         fndiag::install_session_override();
 

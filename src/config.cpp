@@ -25,6 +25,8 @@ void apply(const char *key, const char *value, Config &c) {
         c.foreground_sessions = parse_bool(value, c.foreground_sessions);
     else if (!strcmp(key, "verbose"))
         c.verbose = parse_bool(value, c.verbose);
+    else if (!strcmp(key, "trace_files"))
+        c.trace_files = parse_bool(value, c.trace_files);
     else if (!strcmp(key, "autoupdate"))
         c.autoupdate = parse_bool(value, c.autoupdate);
 }
@@ -55,6 +57,7 @@ Config load() {
     load_file(c);
     apply("foreground", getenv("FNDIAG_FOREGROUND"), c);
     apply("verbose", getenv("FNDIAG_VERBOSE"), c);
+    apply("trace_files", getenv("FNDIAG_TRACE_FILES"), c);
     apply("autoupdate", getenv("FNDIAG_AUTOUPDATE"), c);
     return c;
 }

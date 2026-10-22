@@ -63,8 +63,18 @@ void log_download_finished(id task, id location) {
     std::string path = location ? to_string(send<id>(location, sel("path"))) : "(nil)";
     struct stat st{};
     bool exists = location && stat(path.c_str(), &st) == 0;
-    log_line("download finished: task #%lu path=%s exists=%d size=%lld", send<unsigned long>(task, sel("taskIdentifier")), path.c_str(),
-        exists, exists ? static_cast<long long>(st.st_size) : -1LL);
+    id response = send<id>(task, sel("response"));
+    long status = (response && objc::responds(response, "statusCode")) ? send<long>(response, sel("statusCode")) : -1;
+    log_line("download finished: task #%lu http=%ld path=%s exists=%d size=%lld", send<unsigned long>(task, sel("taskIdentifier")),
+             status, path.c_str(), exists, exists ? static_cast<long long>(st.st_size) : -1LL);
+}
+
+// Tras volver el delegado: si el temporal sigue ahi, el juego no lo movio.
+void log_after_delegate(id task, id location) {
+    std::string path = location ? to_string(send<id>(location, sel("path"))) : "(nil)";
+    struct stat st{};
+    bool exists = location && stat(path.c_str(), &st) == 0;
+    log_line("after delegate: task #%lu temp still exists=%d", send<unsigned long>(task, sel("taskIdentifier")), exists);
 }
 
 // En C++ puro un bloque no convierte implicitamente a `id`.
@@ -117,6 +127,7 @@ void instrument(id delegate) {
         return imp_from_block(^(id self, id session, id task, id location) {
             log_download_finished(task, location); // antes: el fichero temporal solo existe durante esta llamada
             reinterpret_cast<void (*)(id, SEL, id, id, id)>(orig)(self, s, session, task, location);
+            log_after_delegate(task, location);
         });
     });
     log_line("delegate class %s: didCompleteWithError=%d didFinishDownloading=%d", class_getName(cls), a, b);

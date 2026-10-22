@@ -28,4 +28,7 @@ bool responds(id obj, const char *selector);
 // existen; en caso contrario guarda la implementacion anterior en *orig.
 bool replace_class_method(const char *class_name, const char *selector, IMP imp, IMP *orig);
 
+// Igual, para un metodo de instancia.
+bool replace_instance_method(const char *class_name, const char *selector, IMP imp, IMP *orig);
+
 } // namespace fndiag::objc

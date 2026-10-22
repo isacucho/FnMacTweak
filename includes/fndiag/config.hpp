@@ -9,7 +9,9 @@ struct Config {
     // en proceso, para no depender de nsurlsessiond.
     bool foreground_sessions = true;
     // Registra tambien las descargas que terminan sin error.
-    bool verbose = false;
+    bool verbose = true;
+    // Registra las operaciones de fichero sobre temporales de descarga.
+    bool trace_files = true;
     // Comprueba GitHub Releases al arrancar y deja la dylib nueva lista para
     // el siguiente arranque. Desactivado: sustituir una dylib firmada puede
     // invalidar la firma del bundle.

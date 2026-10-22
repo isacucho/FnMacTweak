@@ -40,4 +40,15 @@ bool replace_class_method(const char *class_name, const char *selector, IMP imp,
     return true;
 }
 
+bool replace_instance_method(const char *class_name, const char *selector, IMP imp, IMP *orig) {
+    Class cls = objc_getClass(class_name);
+    if (!cls)
+        return false;
+    Method m = class_getInstanceMethod(cls, sel(selector));
+    if (!m)
+        return false;
+    *orig = method_setImplementation(m, imp);
+    return true;
+}
+
 } // namespace fndiag::objc
