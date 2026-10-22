@@ -14,7 +14,7 @@
 namespace {
 
 NSError *makeError(NSString *msg) {
-    return [NSError errorWithDomain:@"FnFixUpdater" code:1 userInfo:@{NSLocalizedDescriptionKey: msg}];
+    return [NSError errorWithDomain:@"FnMacUpdateFix" code:1 userInfo:@{NSLocalizedDescriptionKey: msg}];
 }
 
 std::vector<long> parseVersion(const std::string& v) {

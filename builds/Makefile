@@ -4,7 +4,7 @@
 CHANNEL ?= public
 include ../common.mk
 
-REPO    ?= AlexGRDev/FnFixUpdate
+REPO    ?= AlexGRDev/FnMacUpdateFix
 SRC     := $(CHANNEL)/$(NAME)
 REL     := release
 

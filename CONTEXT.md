@@ -1,4 +1,4 @@
-# FnFixUpdate
+# FnMacUpdateFix
 
 Dylib (C++/ObjC++) para el Fortnite iOS sideloaded que corre en Apple Silicon con
 FnMacAssistant. Objetivo: diagnosticar y evitar el ESP-CON-000 ("An error occurred
@@ -19,7 +19,7 @@ Software real (no ejercicio académico): arquitectura modular permitida.
 - `includes/Logger.hpp`, `iOSSimulatorContext.hpp`, `Updater.hpp`: código propio de Alex.
 - `src/`: implementación. `MainModule.mm` es el constructor de la dylib.
 - `builds/`: solo `dev/`, `beta/`, `public/` y `release/` (todo generado) y su Makefile.
-  Dylib `FnFixUpdate-V<version>[-dev|-beta].dylib`, nombre calculado en `common.mk`.
+  Dylib `FnMacUpdateFix-V<version>[-dev|-beta].dylib`, nombre calculado en `common.mk`.
   `make` = dev (-O0), `make beta` (-O2), `make public` (-O2, PRODUCTION),
   `make package` = public firmada ad-hoc + manifest.json en `release/`. Solo iOS arm64.
 - Cada carpeta tiene Makefile; el de la raíz delega. Ver `make` en la raíz.
@@ -49,6 +49,7 @@ Software real (no ejercicio académico): arquitectura modular permitida.
   fichero en su misma ruta, así que conserva el nombre de la versión que estaba inyectada.
 
 ## Releases y rollback
-Cada versión es una Release con `FnFixUpdate-V<version>.dylib` y `manifest.json`
-(v0.1.0 y v0.2.0 se renombraron después; su install_name interno sigue siendo `FnFix.dylib`). Para volver atrás:
+Cada versión es una Release con `FnMacUpdateFix-V<version>.dylib` y `manifest.json` en
+https://github.com/AlexGRDev/FnMacUpdateFix. Hasta v0.3.2 el proyecto se llamó FnFixUpdate y
+sus assets conservan ese nombre (v0.1.0 y v0.2.0 tienen install_name interno `FnFix.dylib`). Para volver atrás:
 descargar la dylib de la Release anterior y reinyectarla con Sideloadly.

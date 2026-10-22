@@ -10,7 +10,7 @@
 #define MODULE_VERSION "0.1.0"
 #endif
 
-#define UPDATE_MANIFEST_URL "https://github.com/AlexGRDev/FnFixUpdate/releases/latest/download/manifest.json"
+#define UPDATE_MANIFEST_URL "https://github.com/AlexGRDev/FnMacUpdateFix/releases/latest/download/manifest.json"
 
 __attribute__((constructor)) static void initializer() {
     @autoreleasepool {
@@ -22,7 +22,7 @@ __attribute__((constructor)) static void initializer() {
         fndiag::log_init(container + "/Documents/FnDiag.log");
 
         const fndiag::Config &cfg = fndiag::config();
-        LOG_I("MainModule", "FnFix v%s cargada (foreground=%d isolate=%d create_dirs=%d relative=%d patch_status=%d verbose=%d "
+        LOG_I("MainModule", "FnMacUpdateFix v%s cargada (foreground=%d isolate=%d create_dirs=%d relative=%d patch_status=%d verbose=%d "
               "autoupdate=%d)",
               MODULE_VERSION, cfg.foreground_sessions, cfg.isolate_sessions, cfg.create_dirs, cfg.relative_paths, cfg.patch_status,
               cfg.verbose, cfg.autoupdate);

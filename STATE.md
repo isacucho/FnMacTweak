@@ -1,5 +1,7 @@
 # Estado
 
+- Proyecto y dylib renombrados a FnMacUpdateFix (antes FnFixUpdate) a partir de v0.3.3.
+
 ## v0.3.3
 - Trazas de v0.3.2 en Fortnite: las descargas ya se mueven bien (21/21) y el parche 201->200
   actúa, pero el motor antepone su directorio base a la ruta absoluta que devuelve

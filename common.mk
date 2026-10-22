@@ -14,5 +14,5 @@ else
   $(error CHANNEL debe ser dev, beta o public)
 endif
 
-# FnFixUpdate-V<version>[-beta|-dev].dylib ; public = FnFixUpdate-V<version>.dylib
-NAME := FnFixUpdate-V$(VERSION)$(CH_TAG).dylib
+# FnMacUpdateFix-V<version>[-beta|-dev].dylib ; public = FnMacUpdateFix-V<version>.dylib
+NAME := FnMacUpdateFix-V$(VERSION)$(CH_TAG).dylib
