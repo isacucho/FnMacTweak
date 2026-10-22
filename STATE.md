@@ -1,15 +1,52 @@
 # Estado
 
-## Rollback a v0.3.3 (2026-10-22)
-- Se revirtió (git revert, sin reescribir historial) todo lo posterior a v0.3.3: v0.4.0 a v0.5.0.
-  v0.3.3 es la última versión confirmada en Fortnite (sin ESP-CON-000, descarga completa, lobby).
-- Lo revertido sigue en el historial (commits d379fe3, a2dec8a, 3cf4429, d34ea43): optimización de
-  trazas, espejo de FortniteGame.log con contexto y prueba de PersistentDownloadDir fuera del
-  contenedor. Ninguno se confirmó en Fortnite.
-- Si el juego no arranca: comprobar antes `ps` por una instancia vieja parada por un depurador
-  (debugserver/lldb) del contenedor anterior; abrir la app solo reactiva ese proceso.
-
 - Proyecto y dylib renombrados a FnMacUpdateFix (antes FnFixUpdate) a partir de v0.3.3.
+
+## v0.5.0
+- Prueba de almacen persistente (`persist_storage.cpp`, `persist_downloads`): la dylib comprueba
+  si el sandbox deja escribir en ~/Library/Application Support/FnMacUpdateFix (si no, en
+  /Users/Shared/FnMacUpdateFix), registra cada intento con su errno y, si funciona, convierte
+  Documents/FortniteGame/PersistentDownloadDir en un enlace a esa carpeta. Mueve el contenido
+  local si el almacen esta vacio; si ambos tienen datos no toca nada. Activo en dev y beta,
+  apagado en public. `FNDIAG_PERSIST_BASE` fuerza otra ruta (pruebas).
+- Probado en macOS con un contenedor simulado: contenedor nuevo, datos locales, conflicto,
+  almacen con datos previos y almacen no escribible. Sin verificar en Fortnite: no se sabe si
+  el sandbox permite escribir fuera del contenedor ni si el motor sigue bien a traves del enlace.
+  El resultado sale en el os_log (`persist: ...`).
+
+## v0.4.2
+- Trazas v0.4.1 (contenedor 9DCDBCEF, arranque 12:14): el espejo no muestra ChunkHashError ni
+  ChunkMissingError; LogIoStoreOnDemand reporta Error=0 y Retry=0 en todo el arranque. Las
+  menciones de "Corrupt" son nombres de game features (CorruptionItems...). Es decir, el log no
+  da indicio de chunks dañados o ausentes: la causa del "errors in your installation" (cadena
+  UnsafeEnvironment_BodyCorruptedContent) no está en el contenido descargado. Además el filtro de
+  v0.4.1 no incluía el módulo que origina el kick, por eso no se ve.
+- v0.4.2: el espejo guarda las últimas 120 líneas sin filtrar y, al ver un disparador
+  (UnsafeEnvironment, errors.com.epicgames.common, ChunkHash/Missing, Kick, Disconnected...),
+  vuelca ese contexto + 60 líneas siguientes con la etiqueta [Ctx]. Probado en macOS.
+- Límite acordado: se diagnostica el contenido/descargas; no se evadirá ninguna comprobación
+  de entorno/integridad del cliente si resulta ser la causa.
+
+## v0.4.1
+- Corrección: NO hay re-descarga por arranque. El arranque de las 11:54 (pid 66361) usó un
+  contenedor nuevo (9DCDBCEF, creado 11:54:16 al reinstalar), así que descargar todo era lo
+  esperado. El arranque de las 12:09 (pid 70027) en ese mismo contenedor no descargó nada.
+  Cada reinstalación con Sideloadly implica una descarga completa (~4,75 GB).
+- El terminal no puede leer el contenedor (TCC). Nuevo espejo de
+  diagnóstico (`mirror_log`, beta/dev): desde dentro del juego vuelca el estado de
+  PersistentDownloadDir y reenvía al os_log las líneas relevantes de FortniteGame.log y del
+  log del arranque anterior ([InstallState], [GameLog], [PrevLog]). Apagado en public.
+
+## v0.4.0
+- v0.3.3 confirmada en Fortnite: sin ESP-CON-000, descarga completa y se llega al lobby.
+- Optimización de la dylib: GetDownloadResult ya no registra el sondeo del motor
+  (~50 llamadas/s con status=0: 23.761 de 28.067 líneas en 8,5 min); Logger deja de
+  escribir a std::cout; las funciones POSIX interpuestas usan flags cacheados en vez de
+  config(); copy/exists de NSFileManager solo se enganchan con trazas. En public
+  (PRODUCTION) verbose y trace_files van apagados por defecto; los arreglos siguen activos.
+- Descargas medidas (nsurlsessiond, h3): 166/176 tareas ok. Una conexión QUIC se quedó a
+  0 kbps 62 s; el motor canceló sus tareas y reintentó ~1 min después. Tras relanzar el
+  juego se volvieron a bajar los mismos chunks (~3,5 GB por arranque). Pendiente.
 
 ## v0.3.3
 - Trazas de v0.3.2 en Fortnite: las descargas ya se mueven bien (21/21) y el parche 201->200

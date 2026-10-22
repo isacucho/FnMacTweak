@@ -21,10 +21,26 @@ struct Config {
     bool relative_paths = true;
     // Corrige el 201 que devuelve FBackgroundNSURLSession::GetDownloadResult a 200.
     bool patch_status = true;
+#ifdef PRODUCTION
+    // public: solo errores. Los arreglos (create_dirs, relative_paths...) siguen activos.
+    bool verbose = false;
+    bool trace_files = false;
+    bool mirror_log = false;
+#else
+    // Espejo de FortniteGame.log y del estado de instalacion en el os_log (diagnostico).
+    bool mirror_log = true;
     // Registra tambien las descargas que terminan sin error.
     bool verbose = true;
     // Registra las operaciones de fichero sobre temporales de descarga.
     bool trace_files = true;
+#endif
+    // PersistentDownloadDir pasa a ser un enlace a una carpeta fuera del contenedor. Solo
+    // pruebas (beta/dev): en public queda apagado. La sonda de escritura se hace siempre.
+#ifdef PRODUCTION
+    bool persist_downloads = false;
+#else
+    bool persist_downloads = true;
+#endif
     // Comprueba GitHub Releases al arrancar y deja la dylib nueva lista para
     // el siguiente arranque. Desactivado: sustituir una dylib firmada puede
     // invalidar la firma del bundle.

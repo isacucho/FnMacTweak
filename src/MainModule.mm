@@ -22,15 +22,19 @@ __attribute__((constructor)) static void initializer() {
         fndiag::log_init(container + "/Documents/FnDiag.log");
 
         const fndiag::Config &cfg = fndiag::config();
-        LOG_I("MainModule", "FnMacUpdateFix v%s cargada (foreground=%d isolate=%d create_dirs=%d relative=%d patch_status=%d verbose=%d "
+        LOG_I("MainModule", "FnMacUpdateFix v%s cargada (foreground=%d isolate=%d create_dirs=%d persist=%d relative=%d patch_status=%d verbose=%d "
               "autoupdate=%d)",
-              MODULE_VERSION, cfg.foreground_sessions, cfg.isolate_sessions, cfg.create_dirs, cfg.relative_paths, cfg.patch_status,
+              MODULE_VERSION, cfg.foreground_sessions, cfg.isolate_sessions, cfg.create_dirs, cfg.persist_downloads,
+              cfg.relative_paths, cfg.patch_status,
               cfg.verbose, cfg.autoupdate);
 
+        fndiag::install_persistent_storage(container); // antes de que el juego use PersistentDownloadDir
         fndiag::install_file_hooks();
         fndiag::install_network_hooks();
         fndiag::install_engine_hooks();
         fndiag::install_session_override();
+        if (cfg.mirror_log)
+            fndiag::start_game_log_mirror(container);
 
         if (cfg.autoupdate) {
             Updater::getInstance().setUpdateConfig(UPDATE_MANIFEST_URL, MODULE_VERSION);

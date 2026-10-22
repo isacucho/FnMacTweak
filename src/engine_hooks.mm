@@ -78,7 +78,7 @@ void install_engine_hooks() {
                 r = [(NSString *)r substringFromIndex:[documentsPrefix() length]];
                 LOG_W("EngHook", "REL id=%llu -> %s", dlId, [(NSString *)r UTF8String]);
             }
-            @autoreleasepool {
+            if (outStatus && *outStatus) @autoreleasepool {
                 LOG_W("EngHook", "GetDownloadResult id=%llu status=%d code=%lld ret=%s", dlId, outStatus ? *outStatus : -1,
                       outCode ? *outCode : -1LL, objDesc(r).c_str());
             }
