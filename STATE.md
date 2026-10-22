@@ -2,6 +2,19 @@
 
 - Proyecto y dylib renombrados a FnMacUpdateFix (antes FnFixUpdate) a partir de v0.3.3.
 
+## v0.4.2
+- Trazas v0.4.1 (contenedor 9DCDBCEF, arranque 12:14): el espejo no muestra ChunkHashError ni
+  ChunkMissingError; LogIoStoreOnDemand reporta Error=0 y Retry=0 en todo el arranque. Las
+  menciones de "Corrupt" son nombres de game features (CorruptionItems...). Es decir, el log no
+  da indicio de chunks dañados o ausentes: la causa del "errors in your installation" (cadena
+  UnsafeEnvironment_BodyCorruptedContent) no está en el contenido descargado. Además el filtro de
+  v0.4.1 no incluía el módulo que origina el kick, por eso no se ve.
+- v0.4.2: el espejo guarda las últimas 120 líneas sin filtrar y, al ver un disparador
+  (UnsafeEnvironment, errors.com.epicgames.common, ChunkHash/Missing, Kick, Disconnected...),
+  vuelca ese contexto + 60 líneas siguientes con la etiqueta [Ctx]. Probado en macOS.
+- Límite acordado: se diagnostica el contenido/descargas; no se evadirá ninguna comprobación
+  de entorno/integridad del cliente si resulta ser la causa.
+
 ## v0.4.1
 - Corrección: NO hay re-descarga por arranque. El arranque de las 11:54 (pid 66361) usó un
   contenedor nuevo (9DCDBCEF, creado 11:54:16 al reinstalar), así que descargar todo era lo

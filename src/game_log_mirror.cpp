@@ -4,8 +4,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <thread>
 #include <vector>
@@ -21,6 +23,22 @@ const char *const kPatterns[] = {"InstallBundle", "Journal", "BuildPatch", "IoSt
                                  "orrupt",        "PersistentDownloadDir", "ESP-",    "errors.com", "UnsafeEnvironment", "erify"};
 const char *const kNoise[] = {"\tState ", "Bundle Request Stats", "------", "BackgroundHttpRequest: Display: Download Complete"};
 
+// Lineas que marcan el momento del error: al verlas se vuelca el contexto previo completo.
+const char *const kTriggers[] = {"UnsafeEnvironment", "errors.com.epicgames.common", "ChunkHash", "ChunkMissing", "Kick",
+                                 "kicked",            "RemovedFromMatch",             "Disconnected", "NetworkFailure", "ConnectionLost"};
+
+bool is_trigger(const char *line) {
+    for (const char *t : kTriggers)
+        if (strstr(line, t))
+            return true;
+    return false;
+}
+
+// Ultimas lineas del log (todas, sin filtrar) para dar contexto a un disparador.
+std::deque<std::string> g_ring;
+constexpr size_t kRing = 120;
+int g_cooldown = 0; // lineas restantes en las que se siguen volcando tras un disparo
+
 bool interesting(const char *line) {
     for (const char *n : kNoise)
         if (strstr(line, n))
@@ -33,7 +51,7 @@ bool interesting(const char *line) {
 
 // Reenvia las lineas completas e interesantes de `path` a partir de `offset`. Devuelve el
 // nuevo offset (al final de la ultima linea completa leida).
-long forward_lines(const std::string &path, long offset, const char *tag, size_t &budget) {
+long forward_lines(const std::string &path, long offset, const char *tag, size_t &budget, bool ring = false) {
     FILE *f = fopen(path.c_str(), "r");
     if (!f)
         return offset;
@@ -51,6 +69,23 @@ long forward_lines(const std::string &path, long offset, const char *tag, size_t
         }
         offset = ftell(f);
         line[strcspn(line, "\r\n")] = '\0';
+        if (ring) {
+            if (is_trigger(line) && g_cooldown == 0) {
+                log_line("[Ctx] ---- disparador: %.200s ----", line);
+                for (const std::string &c : g_ring)
+                    log_line("[Ctx] %s", c.c_str());
+                g_ring.clear();
+                g_cooldown = 60;
+            }
+            if (g_cooldown > 0) {
+                log_line("[Ctx] %.300s", line);
+                --g_cooldown;
+            } else {
+                g_ring.emplace_back(line, std::min<size_t>(strlen(line), 300));
+                if (g_ring.size() > kRing)
+                    g_ring.pop_front();
+            }
+        }
         if (interesting(line)) {
             log_line("[%s] %s", tag, line);
             --budget;
@@ -183,7 +218,7 @@ void mirror_main(std::string root) {
                 offset = 0;
             }
             if (s.st_size > offset)
-                offset = forward_lines(current, offset, "GameLog", budget);
+                offset = forward_lines(current, offset, "GameLog", budget, true);
         }
         sleep(1);
     }
