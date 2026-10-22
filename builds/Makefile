@@ -1,5 +1,5 @@
-# Empaquetado y limpieza. Nada de lo generado aqui se versiona (ver README.md):
-# las dylib viajan como assets de GitHub Releases.
+# Empaquetado y limpieza. builds/ solo contiene dev/, beta/, public/ y release/ (todo
+# generado, nada se versiona): las dylib viajan como assets de GitHub Releases.
 # Canal que se empaqueta: public por defecto (make package CHANNEL=beta para un prerelease).
 CHANNEL ?= public
 include ../common.mk
@@ -24,6 +24,6 @@ package:
 		"$(VERSION)" "$(REPO)" "$(VERSION)" "$(NAME)" "$$sha" > $(REL)/manifest.json
 	@echo "--- $(REL)/"; ls -1 $(REL)
 
-# Borra toda la salida; se conservan Makefile y README.md.
+# Borra toda la salida.
 clean:
 	rm -rf dev beta public $(REL)

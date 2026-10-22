@@ -15,8 +15,8 @@
   configuración efímera, se registran NSError (-999, -1003) y la descarga correcta
   (fichero temporal, tamaño, HTTP 200).
 
-- Flags: `-Wall -Wextra -Werror` siempre. `make sanitize` (macOS, -O0, ASan+UBSan,
-  `-fno-sanitize-recover=all`, salida en builds/mac-san/) pasa sin errores en el host
+- Flags: `-Wall -Wextra -Werror` siempre. Hasta v0.2.1 hubo `make sanitize` (macOS, ASan+UBSan);
+  se eliminó (ASan no puede ir en la dylib iOS). En esa versión pasó sin errores en el host
   de prueba, incluido el camino de error 404 del Updater (repo privado).
 
 ## Sin verificar
