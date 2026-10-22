@@ -10,6 +10,9 @@ struct Config {
     // Apagado por defecto: la configuracion que se sabe que funciona usa sesiones
     // background y el parche de codigo (patch_status).
     bool foreground_sessions = false;
+    // Añade el UUID del contenedor al identificador de cada sesion background, para que
+    // nsurlsessiond no reconecte sesiones de una instalacion anterior.
+    bool isolate_sessions = true;
     // Corrige el 201 que devuelve FBackgroundNSURLSession::GetDownloadResult a 200.
     bool patch_status = true;
     // Registra tambien las descargas que terminan sin error.

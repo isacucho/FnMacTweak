@@ -17,9 +17,9 @@ void install_file_hooks();
 // fichero temporal de la descarga existe y no esta vacio.
 void install_engine_hooks();
 
-// Hook que SI cambia comportamiento: cuando Config::foreground_sessions
-// esta activo, +backgroundSessionConfigurationWithIdentifier: devuelve una
-// configuracion efimera en proceso en lugar de una sesion de nsurlsessiond.
+// Hook que SI cambia comportamiento sobre +backgroundSessionConfigurationWithIdentifier::
+// con Config::foreground_sessions devuelve una configuracion efimera en proceso; si no, con
+// Config::isolate_sessions añade el UUID del contenedor al identificador.
 void install_session_override();
 
 }  // namespace fndiag

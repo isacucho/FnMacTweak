@@ -14,3 +14,6 @@
 - Interponer stat/open con dyld: no reservar memoria ni llamar a config() antes de comprobar la
   ruta (se invocan antes de que libc++ esté inicializado). Con ASan en el host de pruebas
   crashea al arrancar porque ASan llama a stat dentro del inicializador de libSystem.
+- Cada reinstalación con Sideloadly cambia el UUID del contenedor. nsurlsessiond recuerda las
+  sesiones background por identificador y sigue entregando al contenedor viejo. Al leer
+  trazas, comprobar qué contenedor existe (`ls -ld ~/Library/Containers/<UUID>`).

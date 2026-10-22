@@ -1,5 +1,15 @@
 # Estado
 
+## v0.3.1
+- Causa encontrada con las trazas de v0.3.0 en Fortnite: Sideloadly crea un contenedor nuevo
+  en cada reinstalación (22A48156 -> 9914379E). nsurlsessiond reconecta las sesiones background
+  por identificador (com.epicgames.backgrounddownloads[.N]) y entrega los ficheros en
+  Library/Caches/com.apple.nsurlsessiond/Downloads del contenedor VIEJO, que ya no existe.
+  El motor no encuentra el temporal: SetDownloadResult result=500 temp=(nil),
+  NSPOSIXErrorDomain 2, ConnectivityError, ESP-CON-000. Nunca llegó un 201 (PATCH=0).
+- Fix: `isolate_sessions` (activo) añade el UUID del contenedor al identificador de sesión.
+  Probado en host macOS; sin verificar en Fortnite.
+
 ## v0.3.0
 - Integrado el parche de motor de NetHook.mm (engine_hooks.mm) y los hooks POSIX de ese fichero
   (file_hooks.cpp). `patch_status` activo y `foreground` apagado por defecto.
