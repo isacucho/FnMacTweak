@@ -20,7 +20,10 @@ namespace fndiag {
 namespace {
 
 const char *const kPatterns[] = {"InstallBundle", "Journal", "BuildPatch", "IoStore", "LogIas", "ChunkHash", "ChunkMissing",
-                                 "orrupt",        "PersistentDownloadDir", "ESP-",    "errors.com", "UnsafeEnvironment", "erify"};
+                                 "orrupt",        "PersistentDownloadDir", "ESP-",    "errors.com", "UnsafeEnvironment", "erify",
+                                 // FPS y configuracion: que ficheros .ini carga el motor y que limita los frames
+                                 "FramePac",      "FrameRate",   "MaxFPS",   "Engine.ini", "GameUserSettings", "SystemSettings",
+                                 "FrontendFrame", "LogConfig: Applying", "ConsoleVariable", "CVar", "DynamicRes"};
 const char *const kNoise[] = {"\tState ", "Bundle Request Stats", "------", "BackgroundHttpRequest: Display: Download Complete"};
 
 // Lineas que marcan el momento del error: al verlas se vuelca el contexto previo completo.
