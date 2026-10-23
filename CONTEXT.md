@@ -46,7 +46,7 @@ Software real (no ejercicio académico): arquitectura modular permitida.
 - `isolate_sessions=1` (por defecto): identificador de sesión background + `.<UUID contenedor>`.
 - `foreground=0` (por defecto): sesiones background (con `isolate_sessions`). `foreground=1` las cambia por
   efímeras en proceso (probado en v0.1.0: no bastó por sí solo).
-- Config: variables `FNDIAG_*` o `Documents/FnDiag.conf` con `foreground`, `isolate_sessions`, `create_dirs`, `relative_paths`, `patch_status`, `unlock_fps`, `fps_target`,
+- Config: variables `FNDIAG_*`, `Documents/FnDiag.conf` o `FnDiag.conf` junto a la dylib con `foreground`, `isolate_sessions`, `create_dirs`, `relative_paths`, `patch_status`, `unlock_fps`, `fps_target`,
   `verbose`, `trace_files`, `autoupdate`.
 - `autoupdate` (apagado): descarga manifest.json de GitHub Releases, verifica SHA-256 y
   deja la dylib nueva para el siguiente arranque, con `.bak` de la anterior. Sustituye el

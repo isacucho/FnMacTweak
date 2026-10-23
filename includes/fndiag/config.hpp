@@ -3,7 +3,7 @@
 namespace fndiag {
 
 // Valores en tiempo de carga. Orden de prioridad: variable de entorno,
-// fichero $HOME/Documents/FnDiag.conf (key=value), valor por defecto.
+// $HOME/Documents/FnDiag.conf, FnDiag.conf junto a la dylib (key=value), valor por defecto.
 struct Config {
     // Sustituye las sesiones NSURLSession "background" por sesiones efimeras
     // en proceso, para no depender de nsurlsessiond.

@@ -2,6 +2,13 @@
 
 - Proyecto y dylib renombrados a FnMacUpdateFix (antes FnFixUpdate) a partir de v0.3.3.
 
+## v0.5.2
+- FnDiag.conf también se lee junto a la dylib (Frameworks/ del bundle), por si el contenedor no es
+  escribible: macOS lo protege por contenedor y cada reinstalación crea uno nuevo (el comando
+  `printf ... > <contenedor>/Documents/FnDiag.conf` funcionó desde la terminal del usuario y falló
+  desde la de Claude). Prioridad: entorno > contenedor > junto a la dylib > defecto. Probado en macOS.
+  Añadir un fichero a un bundle firmado puede invalidar `codesign --verify`; no se ha comprobado.
+
 ## v0.5.1
 - Prueba de v0.5.0 en Fortnite: el sandbox NO deja escribir fuera del contenedor (mkdir en
   ~/Library/Application Support/FnMacUpdateFix y /Users/Shared/FnMacUpdateFix: EPERM). Se quita

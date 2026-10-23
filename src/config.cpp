@@ -1,5 +1,6 @@
 #include "fndiag/config.hpp"
 
+#include <dlfcn.h>
 #include <strings.h>
 
 #include <cstdio>
@@ -48,11 +49,7 @@ void apply(const char *key, const char *value, Config &c) {
         c.autoupdate = parse_bool(value, c.autoupdate);
 }
 
-void load_file(Config &c) {
-    const char *home = getenv("HOME");
-    if (!home)
-        return;
-    std::string path = std::string(home) + "/Documents/FnDiag.conf";
+void load_file(Config &c, const std::string &path) {
     FILE *f = fopen(path.c_str(), "r");
     if (!f)
         return;
@@ -69,9 +66,26 @@ void load_file(Config &c) {
     fclose(f);
 }
 
+// Carpeta de esta dylib (Frameworks/ del bundle). Un FnDiag.conf junto a ella sirve cuando el
+// contenedor no es escribible desde fuera (macOS lo protege por contenedor, y cada reinstalacion
+// crea uno nuevo).
+std::string dylib_dir() {
+    Dl_info info;
+    if (!dladdr(reinterpret_cast<const void *>(&dylib_dir), &info) || !info.dli_fname)
+        return "";
+    std::string p = info.dli_fname;
+    size_t slash = p.rfind('/');
+    return slash == std::string::npos ? "" : p.substr(0, slash);
+}
+
 Config load() {
     Config c;
-    load_file(c);
+    // Prioridad (de menor a mayor): junto a la dylib, contenedor, variables de entorno.
+    std::string dir = dylib_dir();
+    if (!dir.empty())
+        load_file(c, dir + "/FnDiag.conf");
+    if (const char *home = getenv("HOME"))
+        load_file(c, std::string(home) + "/Documents/FnDiag.conf");
     apply("foreground", getenv("FNDIAG_FOREGROUND"), c);
     apply("isolate_sessions", getenv("FNDIAG_ISOLATE_SESSIONS"), c);
     apply("create_dirs", getenv("FNDIAG_CREATE_DIRS"), c);
