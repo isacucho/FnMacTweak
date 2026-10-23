@@ -9,6 +9,17 @@
   desde la de Claude). Prioridad: entorno > contenedor > junto a la dylib > defecto. Probado en macOS.
   Añadir un fichero a un bundle firmado puede invalidar `codesign --verify`; no se ha comprobado.
 
+## v0.5.5
+- v0.5.4 (sonda GameController) hacía que el juego se cerrase en cada arranque, ~1,3 s después de
+  cargar la dylib: NSInternalInconsistencyException '-[UINSWindowProxyFocusHelper
+  updateIfUIKitFirstResponderChanged]: Called off the main thread.' (7 de 7 arranques). v0.5.3
+  funcionaba; solo cambió la sonda. Causa exacta sin confirmar (hipótesis: acceder a
+  GCKeyboard/GCMouse/GCController y los observers con queue:nil fuera del hilo principal).
+- `probe_input` queda apagado por defecto. El teclado/ratón se investiga de otra forma.
+- Aparcado: lobby a 120 FPS. El perfil de dispositivo pone Fort.Mobile.DefaultFrameRate=30 y
+  `Engine.ini` [SystemSettings] tiene menos prioridad; -ExecCmds en uecommandline.txt no se pudo
+  probar (el terminal de Claude no puede escribir en el bundle).
+
 ## v0.5.1
 - Prueba de v0.5.0 en Fortnite: el sandbox NO deja escribir fuera del contenedor (mkdir en
   ~/Library/Application Support/FnMacUpdateFix y /Users/Shared/FnMacUpdateFix: EPERM). Se quita

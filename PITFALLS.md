@@ -4,6 +4,11 @@
   `LogBackgroundHttpRequest`.
 - No asumir que el Assistant mata nsurlsessiond durante los fallos: el pid llevaba vivo
   desde antes. Mirar `ps` antes de culpar al Assistant.
+- Antes de dar una dylib por buena, comprobar que el juego sigue arrancando con ella: la sonda de
+  GameController (v0.5.4) lo cerraba en cada arranque. Mirar `Terminating app due to uncaught
+  exception` en el log del sistema.
+- `cat` esta redefinido en la terminal del usuario (cabecera con color): `"$(cat f)"` mete esa
+  cabecera en el fichero. Usar `command cat` o no leer el fichero.
 - En C++ puro un bloque no convierte a `id`: hace falta `reinterpret_cast<id>` para
   `imp_implementationWithBlock`.
 - Hookear un método heredado con una tabla orig por clase da recursión con `super`:

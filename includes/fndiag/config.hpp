@@ -34,12 +34,10 @@ struct Config {
     // Registra las operaciones de fichero sobre temporales de descarga.
     bool trace_files = true;
 #endif
-#ifdef PRODUCTION
+    // Sonda de dispositivos GameController (teclado, raton, mandos). Apagada por defecto: en v0.5.4
+    // el juego se cerraba en cada arranque (NSInternalInconsistencyException en UIKitMacHelper,
+    // "Called off the main thread") y la sonda fue lo unico que cambio.
     bool probe_input = false;
-#else
-    // Sonda de dispositivos GameController (teclado, raton, mandos). Diagnostico.
-    bool probe_input = true;
-#endif
     // Desbloqueo de FPS: fuerza fps_target en CADisplayLink / MTKView y en
     // UIScreen.maximumFramesPerSecond. Apagado por defecto.
     bool unlock_fps = false;
