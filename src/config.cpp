@@ -36,6 +36,8 @@ void apply(const char *key, const char *value, Config &c) {
         c.verbose = parse_bool(value, c.verbose);
     else if (!strcmp(key, "trace_files"))
         c.trace_files = parse_bool(value, c.trace_files);
+    else if (!strcmp(key, "probe_input"))
+        c.probe_input = parse_bool(value, c.probe_input);
     else if (!strcmp(key, "unlock_fps"))
         c.unlock_fps = parse_bool(value, c.unlock_fps);
     else if (!strcmp(key, "fps_target") && value) {
@@ -93,6 +95,7 @@ Config load() {
     apply("patch_status", getenv("FNDIAG_PATCH_STATUS"), c);
     apply("verbose", getenv("FNDIAG_VERBOSE"), c);
     apply("trace_files", getenv("FNDIAG_TRACE_FILES"), c);
+    apply("probe_input", getenv("FNDIAG_PROBE_INPUT"), c);
     apply("unlock_fps", getenv("FNDIAG_UNLOCK_FPS"), c);
     apply("fps_target", getenv("FNDIAG_FPS_TARGET"), c);
     apply("mirror_log", getenv("FNDIAG_MIRROR_LOG"), c);

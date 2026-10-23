@@ -34,6 +34,12 @@ struct Config {
     // Registra las operaciones de fichero sobre temporales de descarga.
     bool trace_files = true;
 #endif
+#ifdef PRODUCTION
+    bool probe_input = false;
+#else
+    // Sonda de dispositivos GameController (teclado, raton, mandos). Diagnostico.
+    bool probe_input = true;
+#endif
     // Desbloqueo de FPS: fuerza fps_target en CADisplayLink / MTKView y en
     // UIScreen.maximumFramesPerSecond. Apagado por defecto.
     bool unlock_fps = false;

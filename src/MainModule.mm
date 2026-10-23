@@ -32,6 +32,7 @@ __attribute__((constructor)) static void initializer() {
         fndiag::install_engine_hooks();
         fndiag::install_session_override();
         fndiag::install_fps_hooks();
+        fndiag::install_input_probe();
         if (cfg.mirror_log)
             fndiag::start_game_log_mirror(container);
 

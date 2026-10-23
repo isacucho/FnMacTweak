@@ -26,7 +26,7 @@ HEADERS := $(wildcard ../includes/*.hpp ../includes/fndiag/*.hpp)
 FLAGS   := -target $(TARGET) -isysroot $(SDK) -I../includes $(DEFINES) \
            -std=c++17 $(OPT) -g -Wall -Wextra -Werror -fvisibility=hidden
 LDFLAGS := -dynamiclib -install_name @executable_path/Frameworks/$(NAME) \
-           -framework Foundation -framework CoreFoundation
+           -framework Foundation -framework CoreFoundation -framework GameController
 
 all: $(OUT)
 

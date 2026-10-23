@@ -24,6 +24,10 @@ void install_engine_hooks();
 // Config::isolate_sessions añade el UUID del contenedor al identificador.
 void install_session_override();
 
+// Sonda de entrada (Config::probe_input): registra que teclado, raton y mandos ve el juego por
+// GameController, en el arranque y en cada conexion. Solo observa.
+void install_input_probe();
+
 // Desbloqueo de FPS (Config::unlock_fps, Config::fps_target): intercepta
 // -[CADisplayLink setPreferredFramesPerSecond:] / setPreferredFrameRateRange:,
 // -[MTKView setPreferredFramesPerSecond:] y -[UIScreen maximumFramesPerSecond]. Cada llamada

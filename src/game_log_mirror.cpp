@@ -23,7 +23,9 @@ const char *const kPatterns[] = {"InstallBundle", "Journal", "BuildPatch", "IoSt
                                  "orrupt",        "PersistentDownloadDir", "ESP-",    "errors.com", "UnsafeEnvironment", "erify",
                                  // FPS y configuracion: que ficheros .ini carga el motor y que limita los frames
                                  "FramePac",      "FrameRate",   "MaxFPS",   "Engine.ini", "GameUserSettings", "SystemSettings",
-                                 "FrontendFrame", "LogConfig: Applying", "ConsoleVariable", "CVar", "DynamicRes"};
+                                 "FrontendFrame", "LogConfig: Applying", "ConsoleVariable", "CVar", "DynamicRes",
+                                 // entrada: dispositivos y metodo de entrada que decide el juego
+                                 "InputMethod",   "LogInput",    "KBM",      "Mouse",      "Keyboard",       "GameController"};
 const char *const kNoise[] = {"\tState ", "Bundle Request Stats", "------", "BackgroundHttpRequest: Display: Download Complete"};
 
 // Lineas que marcan el momento del error: al verlas se vuelca el contexto previo completo.
