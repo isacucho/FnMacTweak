@@ -24,10 +24,10 @@ void install_engine_hooks();
 // Config::isolate_sessions añade el UUID del contenedor al identificador.
 void install_session_override();
 
-// Prueba el almacen de descargas fuera del contenedor: comprueba si el sandbox deja escribir en
-// ~/Library/Application Support/FnMacUpdateFix (o /Users/Shared) y, con persist_downloads,
-// convierte Documents/FortniteGame/PersistentDownloadDir en un enlace a esa carpeta para que
-// sobreviva a reinstalar. Debe ir antes de que el juego cree o use el directorio.
-void install_persistent_storage(const std::string &container);
+// Desbloqueo de FPS (Config::unlock_fps, Config::fps_target): intercepta
+// -[CADisplayLink setPreferredFramesPerSecond:] / setPreferredFrameRateRange:,
+// -[MTKView setPreferredFramesPerSecond:] y -[UIScreen maximumFramesPerSecond]. Cada llamada
+// distinta se registra una vez, para saber que usa el juego.
+void install_fps_hooks();
 
 }  // namespace fndiag

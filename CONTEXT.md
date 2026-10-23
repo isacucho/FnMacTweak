@@ -32,8 +32,10 @@ Software real (no ejercicio académico): arquitectura modular permitida.
   Salen por os_log (subsystem `fndiag`) y por `$HOME/Documents/FnDiag.log`.
 - `patch_status=1` (por defecto): `GetDownloadResult` devuelve 200 en vez de 201 si el temporal
   existe y no está vacío. Es la configuración que se sabe que funcionaba (NetHook.mm original).
-- `persist_downloads` (beta/dev: 1, public: 0): `PersistentDownloadDir` pasa a enlace a
-  ~/Library/Application Support/FnMacUpdateFix para sobrevivir a reinstalar (prueba, v0.5.0).
+- `unlock_fps=0` (por defecto, opt-in) y `fps_target=120`: fuerza la tasa pedida en
+  CADisplayLink (setPreferredFramesPerSecond / setPreferredFrameRateRange), MTKView y
+  UIScreen.maximumFramesPerSecond (`fps_unlock.cpp`). Cada llamada distinta se registra una vez
+  como `[FPS]`. Los rangos vacíos 0/0/0 pasan sin tocar: un rango inválido lanza excepción.
 - `relative_paths=1` (por defecto): `GetDownloadResult` devuelve la ruta del temporal relativa a
   `Documents/`; con la absoluta el motor la duplica y no encuentra la descarga (bucle).
 - `create_dirs=1` (por defecto): crea `PersistentDownloadDir/BackgroundHttp/<build>/` si falta
@@ -44,7 +46,7 @@ Software real (no ejercicio académico): arquitectura modular permitida.
 - `isolate_sessions=1` (por defecto): identificador de sesión background + `.<UUID contenedor>`.
 - `foreground=0` (por defecto): sesiones background (con `isolate_sessions`). `foreground=1` las cambia por
   efímeras en proceso (probado en v0.1.0: no bastó por sí solo).
-- Config: variables `FNDIAG_*` o `Documents/FnDiag.conf` con `foreground`, `isolate_sessions`, `create_dirs`, `relative_paths`, `patch_status`,
+- Config: variables `FNDIAG_*` o `Documents/FnDiag.conf` con `foreground`, `isolate_sessions`, `create_dirs`, `relative_paths`, `patch_status`, `unlock_fps`, `fps_target`,
   `verbose`, `trace_files`, `autoupdate`.
 - `autoupdate` (apagado): descarga manifest.json de GitHub Releases, verifica SHA-256 y
   deja la dylib nueva para el siguiente arranque, con `.bak` de la anterior. Sustituye el

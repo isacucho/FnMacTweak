@@ -2,6 +2,19 @@
 
 - Proyecto y dylib renombrados a FnMacUpdateFix (antes FnFixUpdate) a partir de v0.3.3.
 
+## v0.5.1
+- Prueba de v0.5.0 en Fortnite: el sandbox NO deja escribir fuera del contenedor (mkdir en
+  ~/Library/Application Support/FnMacUpdateFix y /Users/Shared/FnMacUpdateFix: EPERM). Se quita
+  `persist_downloads` / `persist_storage.cpp`. No tocó nada del contenedor.
+- El crash de arranque de esas pruebas (SIGSEGV en MarketplaceKitWrapper,
+  AppDistributorWrapper.getCurrent) es del framework del juego, no de la dylib; el bundle no llevaba
+  FnMacCrashFix.dylib. No se falsea la información de distribución.
+- Nuevo `unlock_fps` (apagado por defecto, `fps_target=120`). El HUD marca ~29 FPS (intervalo 34 ms).
+  Probado en macOS con un CADisplayLink real; la prueba destapó un fallo: pasar el rango 0/0/0
+  como 0/120/120 lanza NSInvalidArgumentException. Corregido. Sin verificar en Fortnite: puede que
+  el juego limite también por configuración interna.
+- Pendiente: resolución nativa y teclado/ratón nativos (investigar antes).
+
 ## v0.5.0
 - Prueba de almacen persistente (`persist_storage.cpp`, `persist_downloads`): la dylib comprueba
   si el sandbox deja escribir en ~/Library/Application Support/FnMacUpdateFix (si no, en
