@@ -7,7 +7,7 @@ CXX     := xcrun --sdk iphoneos clang++
 TARGET  := arm64-apple-ios17.0
 
 OPT     := -O2
-DEFINES := -DMODULE_VERSION=\"$(VERSION)\"
+DEFINES := -DMODULE_VERSION=\"$(VERSION)\" -DUPDATE_MANIFEST_URL=\"$(MANIFEST_URL)\"
 ifeq ($(CHANNEL),dev)
   OPT := -O0
 endif
