@@ -1,4 +1,4 @@
-# Variables comunes a src/Makefile y builds/Makefile (nombre y canal de la dylib).
+# Variables comunes: nombre de la dylib y canal de build.
 #   CHANNEL  dev (por defecto) | beta | public
 ROOT     := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 VERSION  := $(shell cat $(ROOT)/VERSION)
@@ -14,5 +14,4 @@ else
   $(error CHANNEL debe ser dev, beta o public)
 endif
 
-# FnMacUpdateFix-V<version>[-beta|-dev].dylib ; public = FnMacUpdateFix-V<version>.dylib
-NAME := FnMacUpdateFix-V$(VERSION)$(CH_TAG).dylib
+NAME := FnMacKickFix-V$(VERSION)$(CH_TAG).dylib

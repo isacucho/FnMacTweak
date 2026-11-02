@@ -1,5 +1,11 @@
 .DS_Store
 sessions/
-builds/*
-!builds/Makefile
-!builds/README.md
+
+# Código fuente — nunca publicado
+src/
+include/
+includes/
+tools/
+
+# Builds: solo los artefactos de release se distribuyen via gh release
+builds/
