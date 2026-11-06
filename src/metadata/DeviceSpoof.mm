@@ -1,4 +1,3 @@
-#import "metadata/DeviceSpoof.hpp"
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <os/log.h>

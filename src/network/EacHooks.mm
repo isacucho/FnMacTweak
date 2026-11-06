@@ -103,12 +103,6 @@ static void hookComplete(Class cls, SEL sel) {
     }));
 }
 
-// Spoof EAC server validation responses to force success.
-// EAC server responds with {"allow":false} / HTTP 403 / {"success":false} when it
-// detects integrity violations. We intercept all EAC endpoints and force a success
-// response before the game processes it. Outgoing violation reports are also
-// suppressed at the request body level (hookURLRequest) so the server never
-// receives violation data in the first place.
 static NSData* spoof_eac_response(NSData* data, NSURLSessionDataTask* task, NSString* url) {
     NSString* json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (!json) return data;
@@ -116,12 +110,10 @@ static NSData* spoof_eac_response(NSData* data, NSURLSessionDataTask* task, NSSt
     NSString* endpoint = [url lastPathComponent];
     int http = httpStatus(task);
 
-    // Log EVERY EAC endpoint response for diagnosis
     fndiag::log_line("[EAC-HTTP] %s http=%d body=%s",
                      [endpoint UTF8String], http,
                      [[json substringToIndex:MIN(200u, (unsigned)json.length)] UTF8String]);
 
-    // Spoof all explicit rejections across any EAC endpoint
     bool rejected = (http == 403) || (http == 400) || (http >= 500) ||
                     [json containsString:@"\"allow\":false"] ||
                     [json containsString:@"\"allow\" : false"] ||
@@ -137,7 +129,6 @@ static NSData* spoof_eac_response(NSData* data, NSURLSessionDataTask* task, NSSt
     spoofed = [spoofed stringByReplacingOccurrencesOfString:@"\"success\":false"   withString:@"\"success\":true"];
     spoofed = [spoofed stringByReplacingOccurrencesOfString:@"\"success\" : false" withString:@"\"success\" : true"];
     if ([spoofed isEqualToString:json]) {
-        // No known rejection field: inject minimal success body
         spoofed = @"{\"allow\":true,\"success\":true}";
     }
     fndiag::log_line("[EAC-SPOOF] %s: forced success (http=%d was: %s)",
@@ -155,7 +146,6 @@ static void hookReceiveData(Class cls, SEL sel) {
         @autoreleasepool {
             NSString* url = task.originalRequest.URL.absoluteString;
 
-            // Spoof all EAC verification endpoints: verify/match, verify/event, etc.
             if (url && ([url containsString:@"verify/match"] ||
                         [url containsString:@"verify/event"] ||
                         [url containsString:@"verify/session"] ||
@@ -228,6 +218,19 @@ static void hookFileManager() {
     }
 }
 
+static id (*orig_dataTaskWithRequest)(id, SEL, NSURLRequest*) = NULL;
+static id h_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest* request) {
+    if (request && [request isKindOfClass:[NSURLRequest class]]) {
+        NSString* urlStr = [[request URL] absoluteString];
+        if (urlStr && ([urlStr containsString:@"epicgames.com"] || [urlStr containsString:@"epicgames.dev"])) {
+            NSMutableURLRequest* mutableReq = [request mutableCopy];
+            [mutableReq setValue:@"Fortnite/43.00.0 (iPad14,3; iPhone OS 17.5; Scale/3.00)" forHTTPHeaderField:@"User-Agent"];
+            request = mutableReq;
+        }
+    }
+    return orig_dataTaskWithRequest ? orig_dataTaskWithRequest(self, _cmd, request) : nil;
+}
+
 static void hookURLRequest() {
     Class reqClass = NSClassFromString(@"NSMutableURLRequest");
 
@@ -260,11 +263,6 @@ static void hookURLRequest() {
                             }
                         });
                     }
-                    // Suppress EAC violation event reports before they reach the server.
-                    // verify/event is where EAC POSTs integrity violation data (hash mismatch,
-                    // UnsafeEnvironment result). Server receives {} instead of violation data
-                    // so it cannot issue a server-side kick. HTTP response spoofed to success
-                    // in hookReceiveData. __TEXT untouched — no memory patching required.
                     if ([urlStr containsString:@"verify/event"]) {
                         fndiag::log_line("[EAC-SUPPRESS] clearing verify/event body (was %lu bytes)",
                                          (unsigned long)(body ? body.length : 0));
@@ -306,10 +304,40 @@ static void hookURLRequest() {
         SetHeaderFn origSetHeader = (SetHeaderFn)method_getImplementation(setHeaderMethod);
         method_setImplementation(setHeaderMethod, imp_implementationWithBlock(^(id self_, NSString* value, NSString* field) {
             NSString* urlStr = [[self_ URL] absoluteString];
-            if (urlStr && ([urlStr containsString:@"epicgames.com"] || [urlStr containsString:@"epicgames.dev"]))
+            if (urlStr && ([urlStr containsString:@"epicgames.com"] || [urlStr containsString:@"epicgames.dev"])) {
+                if ([field caseInsensitiveCompare:@"User-Agent"] == NSOrderedSame) {
+                    value = @"Fortnite/43.00.0 (iPad14,3; iPhone OS 17.5; Scale/3.00)";
+                }
                 LOG_W("EAC-Auth", "CLIENT HEADER [%s]: %s = %s", cstr(urlStr), cstr(field), cstr(value));
+            }
             if (origSetHeader) origSetHeader(self_, setHeaderSel, value, field);
         }));
+    }
+
+    SEL initSel = @selector(initWithURL:cachePolicy:timeoutInterval:);
+    Method initMethod = class_getInstanceMethod(reqClass, initSel);
+    if (initMethod) {
+        typedef id (*InitFn)(id, SEL, NSURL*, NSURLRequestCachePolicy, NSTimeInterval);
+        InitFn origInit = (InitFn)method_getImplementation(initMethod);
+        method_setImplementation(initMethod, imp_implementationWithBlock(^id(id self_, NSURL* url, NSURLRequestCachePolicy policy, NSTimeInterval interval) {
+            self_ = origInit ? origInit(self_, initSel, url, policy, interval) : self_;
+            if (self_ && url) {
+                NSString* urlStr = [url absoluteString];
+                if ([urlStr containsString:@"epicgames.com"] || [urlStr containsString:@"epicgames.dev"]) {
+                    [self_ setValue:@"Fortnite/43.00.0 (iPad14,3; iPhone OS 17.5; Scale/3.00)" forHTTPHeaderField:@"User-Agent"];
+                }
+            }
+            return self_;
+        }));
+    }
+
+    Class urlSessionCls = NSClassFromString(@"NSURLSession");
+    if (urlSessionCls) {
+        Method m = class_getInstanceMethod(urlSessionCls, @selector(dataTaskWithRequest:));
+        if (m) {
+            orig_dataTaskWithRequest = (id(*)(id, SEL, NSURLRequest*))method_getImplementation(m);
+            method_setImplementation(m, (IMP)h_dataTaskWithRequest);
+        }
     }
 }
 
@@ -351,8 +379,6 @@ static void h_CFSetBody(CFTypeRef req, CFDataRef body) {
 }
 #endif
 
-// Hook base64 encoding to capture pre-encoded payloads in EAC token size range.
-// Payloads of 200-400 bytes are likely EAC JWT/challenge tokens before base64.
 #ifndef PRODUCTION
 static IMP o_b64Enc = NULL;
 static NSString* h_b64Enc(NSData* self, SEL _cmd, NSUInteger options) {
@@ -386,7 +412,6 @@ static void og_installNetHooks(void) {
         if (sym && mshook) mshook(sym, (void*)h_CFSetBody, (void**)&orig_CFSetBody);
     }
 
-    // Base64 hook: capture EAC token payloads before encoding
     Class dataCls = NSClassFromString(@"NSData");
     if (dataCls && !o_b64Enc) {
         Method m = class_getInstanceMethod(dataCls, @selector(base64EncodedStringWithOptions:));
@@ -394,15 +419,6 @@ static void og_installNetHooks(void) {
     }
 #endif
 }
-
-// ---------------------------------------------------------------------------
-// CC_SHA256 shadow hook (diagnostic / defense-in-depth)
-//
-// Confirmed at runtime: EAC calls CC_SHA256 only for heap token buffers
-// (16-128 bytes, addresses 0x7a...). It does NOT hash __TEXT pages via
-// CC_SHA256. The shadow condition (buf <= patch_va <= buf+len) never fires
-// in practice. Kept as defense-in-depth in case behavior changes.
-// ---------------------------------------------------------------------------
 
 static const uintptr_t kPatchFileOff    = 0x24a8258;
 static const uint8_t   kOrigBytes[4]    = {0xff, 0x03, 0x06, 0xd1};
@@ -434,21 +450,6 @@ extern "C" unsigned char* fndiag_CC_SHA256(const void* data, CC_LONG len, unsign
     return CC_SHA256(data, len, md);
 }
 
-// ---------------------------------------------------------------------------
-// EOS SDK integrity-violation bypass
-//
-// EAC detects fnpatch.sh's __TEXT modification, then fires
-// AddNotifyClientIntegrityViolated. The game's registered callback does two
-// things: (a) calls ClientWasKicked via vtable [we already intercept that],
-// (b) drops the EOS network session [we can't intercept that via vtable].
-// Fix: replace the game's callback with a no-op at registration time so EAC
-// never notifies the game about the violation.
-// ---------------------------------------------------------------------------
-
-// EOS_AntiCheatCommon_ReceiveMessageFromServerOptions layout (EOS SDK public header):
-//   int32_t ApiVersion  (offset 0)
-//   uint32_t DataLengthBytes (offset 4)
-//   const void* Data    (offset 8, arm64 ptr)
 struct EAC_RxOpts { int32_t ApiVersion; uint32_t DataLengthBytes; const void* Data; };
 
 extern "C" {
@@ -458,10 +459,6 @@ extern "C" {
         void* handle, const void* opts, void* cdata, void (*fn)(const void*));
     int32_t  EOS_AntiCheatClient_PollStatus(void* handle, const void* opts, void* out_info);
     int32_t  EOS_AntiCheatClient_ReceiveMessageFromServer(void* handle, const void* opts);
-    // EndSession: terminates the EAC client session. Called by the game when leaving a match,
-    // but ALSO called internally by the EOS SDK when the server sends a kick directive via
-    // ReceiveMessageFromServer. Intercepting it as a no-op prevents server-side kicks from
-    // closing the EOS network session while in-match.
     int32_t  EOS_AntiCheatClient_EndSession(void* handle, const void* opts);
 }
 
@@ -477,13 +474,11 @@ uint64_t fndiag_add_notify_peer(void* h, const void* o, void* /*c*/, void (* /*f
     return EOS_AntiCheatClient_AddNotifyPeerActionRequired(h, o, nullptr, noop_eac_violation);
 }
 int32_t fndiag_poll_status(void* /*h*/, const void* /*o*/, void* /*out*/) {
-    return 0; // EOS_Success - suppress EAC violation detection via periodic polling
+    return 0;
 }
 int32_t fndiag_receive_msg_from_server(void* h, const void* opts) {
     static int s_count = 0;
     ++s_count;
-    // Log first byte of each message for type identification (LLDB diagnostic).
-    // EAC messages are opaque binary; byte[0] indicates message type.
     const EAC_RxOpts* o = static_cast<const EAC_RxOpts*>(opts);
     uint8_t b0 = 0, b1 = 0;
     if (o && o->Data && o->DataLengthBytes >= 2) {
@@ -495,16 +490,11 @@ int32_t fndiag_receive_msg_from_server(void* h, const void* opts) {
                          s_count, o ? o->DataLengthBytes : 0, b0, b1);
     return EOS_AntiCheatClient_ReceiveMessageFromServer(h, opts);
 }
-// Block EOS SDK from terminating the EAC session when the server sends a kick directive.
-// PITFALL V2.0.15: without passthrough of EndSession, the game's BeginSession on the next
-// match attempt may fail because the SDK considers a session already active. Monitor LLDB
-// for [EAC-ENDSESSION] entries — if they appear only on match exit (not mid-match), remove
-// this no-op and restore the original call.
 int32_t fndiag_end_session(void* /*h*/, const void* /*opts*/) {
     static int s_es = 0;
     ++s_es;
     fndiag::log_line("[EAC-ENDSESSION] EndSession call #%d SUPPRESSED", s_es);
-    return 0; // EOS_Success
+    return 0;
 }
 }
 
@@ -518,8 +508,6 @@ __attribute__((used, section("__DATA,__interpose"))) static const EacInterpose g
     EAC_INTERPOSE(fndiag_end_session,             EOS_AntiCheatClient_EndSession),
     EAC_INTERPOSE(fndiag_CC_SHA256,               CC_SHA256),
 };
-
-// ---------------------------------------------------------------------------
 
 void installNetHooks(void) {
     if (!gVerifyQueue)

@@ -7,7 +7,7 @@
 #include "core/DiagLog.hpp"
 #include "core/SimulatorContext.hpp"
 #include "core/DebugCanvas.hpp"
-#include "metadata/DeviceSpoof.hpp"
+#include "core/Logger.hpp"
 #include "network/EacHooks.hpp"
 #include "update/TerrainPatcher.hpp"
 #include "update/KickPatcher.hpp"

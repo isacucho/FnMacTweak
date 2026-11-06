@@ -1,15 +1,27 @@
+/* ************************************************************************** */
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   Logger.hpp                                         :+:      :+:    :+:   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: agarcia2 <agarcia2@student.42barcelona.co  +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/10/19 20:54:16 by agarcia2          #+#    #+#             */
+/*   Updated: 2026/11/06 08:00:00 by agarcia2         ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+
 #pragma once
+#include <iostream>
+#include <string>
 #include <chrono>
+#include <iomanip>
+#include <mutex>
 #include <cstdio>
 #include <ctime>
-#include <iomanip>
-#include <iostream>
-#include <mutex>
-#include <string>
 #include <os/log.h>
+#import <Foundation/Foundation.h>
 
-// Subsistema unificado. Visible en Console.app filtrando por "com.alexgrdev.fnmaccompat".
-#define FNCOMPAT_SUBSYSTEM "com.alexgrdev.fnmaccompat"
+#define HM_SUBSYSTEM "com.alexgrdev.fnmackickfix"
 
 enum class LogLevel { DEBUG, INFO, WARNING, ERROR };
 
@@ -30,25 +42,25 @@ public:
     }
 
 private:
-    Logger() : m_log(os_log_create(FNCOMPAT_SUBSYSTEM, "main")) {}
+    Logger() : m_log(os_log_create(HM_SUBSYSTEM, "main")) {}
     std::mutex m_mutex;
     os_log_t m_log;
-
-    template<typename... Args>
-    void printLog(LogLevel level, const std::string& tag, const char* format, Args... args) {
-        char buf[2048];
-        std::snprintf(buf, sizeof(buf), format, args...);
-        emit(level, tag, buf);
-    }
 
     void printLog(LogLevel level, const std::string& tag, const char* format) {
         emit(level, tag, format);
     }
 
+    template<typename... Args>
+    void printLog(LogLevel level, const std::string& tag, const char* format, Args... args) {
+        char finalBuffer[2048];
+        std::snprintf(finalBuffer, sizeof(finalBuffer), format, args...);
+        emit(level, tag, finalBuffer);
+    }
+
     void emit(LogLevel level, const std::string& tag, const char* msg) {
         std::lock_guard<std::mutex> lock(m_mutex);
         os_log_with_type(m_log, toOsType(level), "[%{public}s] %{public}s", tag.c_str(), msg);
-        writeHeader(level, tag);
+        writeLogHeader(level, tag);
         std::cout << msg << std::endl;
     }
 
@@ -62,23 +74,23 @@ private:
         return OS_LOG_TYPE_DEFAULT;
     }
 
-    void writeHeader(LogLevel level, const std::string& tag) {
+    void writeLogHeader(LogLevel level, const std::string& tag) {
         auto now = std::chrono::system_clock::now();
-        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::time_t time_val = std::chrono::system_clock::to_time_t(now);
         std::tm tm_buf;
-        localtime_r(&t, &tm_buf);
+        localtime_r(&time_val, &tm_buf);
         std::cout << "[" << std::put_time(&tm_buf, "%H:%M:%S") << "] ";
-        std::cout << "[" << levelStr(level) << "] [" << tag << "] ";
+        std::cout << "[" << getLevelString(level) << "] [" << tag << "] ";
     }
 
-    const char* levelStr(LogLevel level) {
+    const char* getLevelString(LogLevel level) {
         switch (level) {
             case LogLevel::DEBUG:   return "DEBUG";
             case LogLevel::INFO:    return "INFO";
             case LogLevel::WARNING: return "WARN";
             case LogLevel::ERROR:   return "ERROR";
         }
-        return "?";
+        return "UNKNOWN";
     }
 };
 
@@ -92,4 +104,29 @@ private:
     #define LOG_I(tag, fmt, ...) Logger::getInstance().log(LogLevel::INFO,    tag, fmt, ##__VA_ARGS__)
     #define LOG_W(tag, fmt, ...) Logger::getInstance().log(LogLevel::WARNING, tag, fmt, ##__VA_ARGS__)
     #define LOG_E(tag, fmt, ...) Logger::getInstance().log(LogLevel::ERROR,   tag, fmt, ##__VA_ARGS__)
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void installSpoofHooks(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#ifdef __cplusplus
+class SpoofLogManager {
+public:
+    static SpoofLogManager& getInstance() {
+        static SpoofLogManager instance;
+        return instance;
+    }
+    void initializeSpoofs() {
+        installSpoofHooks();
+    }
+private:
+    SpoofLogManager() = default;
+};
 #endif
