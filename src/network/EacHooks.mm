@@ -445,16 +445,24 @@ extern "C" unsigned char* fndiag_CC_SHA256(const void* data, CC_LONG len, unsign
 // never notifies the game about the violation.
 // ---------------------------------------------------------------------------
 
+// EOS_AntiCheatCommon_ReceiveMessageFromServerOptions layout (EOS SDK public header):
+//   int32_t ApiVersion  (offset 0)
+//   uint32_t DataLengthBytes (offset 4)
+//   const void* Data    (offset 8, arm64 ptr)
+struct EAC_RxOpts { int32_t ApiVersion; uint32_t DataLengthBytes; const void* Data; };
+
 extern "C" {
     uint64_t EOS_AntiCheatClient_AddNotifyClientIntegrityViolated(
         void* handle, const void* opts, void* cdata, void (*fn)(const void*));
     uint64_t EOS_AntiCheatClient_AddNotifyPeerActionRequired(
         void* handle, const void* opts, void* cdata, void (*fn)(const void*));
     int32_t  EOS_AntiCheatClient_PollStatus(void* handle, const void* opts, void* out_info);
-    // ReceiveMessageFromServer: called by game's net driver when EAC server sends a msg.
-    // If the server sends a "kick / integrity violation" directive this way, suppressing
-    // it prevents the client from acting on it. Returns EOS_Success (0) always.
     int32_t  EOS_AntiCheatClient_ReceiveMessageFromServer(void* handle, const void* opts);
+    // EndSession: terminates the EAC client session. Called by the game when leaving a match,
+    // but ALSO called internally by the EOS SDK when the server sends a kick directive via
+    // ReceiveMessageFromServer. Intercepting it as a no-op prevents server-side kicks from
+    // closing the EOS network session while in-match.
+    int32_t  EOS_AntiCheatClient_EndSession(void* handle, const void* opts);
 }
 
 static void noop_eac_violation(const void*) {}
@@ -471,13 +479,27 @@ uint64_t fndiag_add_notify_peer(void* h, const void* o, void* /*c*/, void (* /*f
 int32_t fndiag_poll_status(void* /*h*/, const void* /*o*/, void* /*out*/) {
     return 0; // EOS_Success - suppress EAC violation detection via periodic polling
 }
-// Let EAC server messages process normally.
-// PITFALL: suppressing ALL messages here breaks the EAC session handshake, causing
-// EOS SDK to report errors.com.epicgames.common.processing after ~54s in-match.
-// Server-sent kick directives are already blocked by:
-//   (a) AddNotifyClientIntegrityViolated -> no-op (game callback never fires)
-//   (b) verify/event body cleared to {} (server never receives violation data)
-// Keep this stub for LLDB breakpoints + diagnostic counting only.
+int32_t fndiag_receive_msg_from_server(void* h, const void* opts) {
+    static int s_count = 0;
+    ++s_count;
+    // Log first byte of each message for type identification (LLDB diagnostic).
+    // EAC messages are opaque binary; byte[0] indicates message type.
+    const EAC_RxOpts* o = static_cast<const EAC_RxOpts*>(opts);
+    uint8_t b0 = 0, b1 = 0;
+    if (o && o->Data && o->DataLengthBytes >= 2) {
+        b0 = static_cast<const uint8_t*>(o->Data)[0];
+        b1 = static_cast<const uint8_t*>(o->Data)[1];
+    }
+    if (s_count <= 10 || (s_count % 50) == 0)
+        fndiag::log_line("[EAC-RX] ReceiveMessageFromServer #%d len=%u type=0x%02x%02x",
+                         s_count, o ? o->DataLengthBytes : 0, b0, b1);
+    return EOS_AntiCheatClient_ReceiveMessageFromServer(h, opts);
+}
+// Block EOS SDK from terminating the EAC session when the server sends a kick directive.
+// PITFALL V2.0.15: without passthrough of EndSession, the game's BeginSession on the next
+// match attempt may fail because the SDK considers a session already active. Monitor LLDB
+// for [EAC-ENDSESSION] entries — if they appear only on match exit (not mid-match), remove
+// this no-op and restore the original call.
 int32_t fndiag_end_session(void* /*h*/, const void* /*opts*/) {
     static int s_es = 0;
     ++s_es;
@@ -493,6 +515,7 @@ __attribute__((used, section("__DATA,__interpose"))) static const EacInterpose g
     EAC_INTERPOSE(fndiag_add_notify_peer,         EOS_AntiCheatClient_AddNotifyPeerActionRequired),
     EAC_INTERPOSE(fndiag_poll_status,             EOS_AntiCheatClient_PollStatus),
     EAC_INTERPOSE(fndiag_receive_msg_from_server, EOS_AntiCheatClient_ReceiveMessageFromServer),
+    EAC_INTERPOSE(fndiag_end_session,             EOS_AntiCheatClient_EndSession),
     EAC_INTERPOSE(fndiag_CC_SHA256,               CC_SHA256),
 };
 
