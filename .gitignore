@@ -1,5 +1,6 @@
 .DS_Store
 sessions/
 
+log.txt
 # Builds: solo los artefactos de release se distribuyen via gh release
 builds/
