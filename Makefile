@@ -1,4 +1,8 @@
-.PHONY: all dev beta public package clean
+FW_DIR := /Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app/Frameworks
+# Installed under the V2.0.15 name because the binary's LC_LOAD_DYLIB is hardcoded to it.
+INSTALLED_NAME := FnMacKickFix-V2.0.15-dev.dylib
+
+.PHONY: all dev beta public package clean install
 
 include common.mk
 
@@ -27,6 +31,9 @@ CPP_SRC := \
     src/update/FileHooks.cpp \
     src/update/NetworkHooks.cpp \
     src/update/SessionOverride.cpp \
+    src/update/TerrainPatcher.cpp \
+    src/update/KickPatcher.cpp \
+    src/update/NmtPatcher.cpp \
     src/input/FpsUnlock.cpp \
     src/input/InputIni.cpp \
     src/input/NativeKbm.cpp
@@ -73,6 +80,11 @@ public:
 
 package: public
 	$(MAKE) -C builds package CHANNEL=public
+
+install: dev
+	cp builds/dev/$(NAME) $(FW_DIR)/$(INSTALLED_NAME)
+	@echo "installed $(NAME) as $(INSTALLED_NAME)"
+	@md5 builds/dev/$(NAME) $(FW_DIR)/$(INSTALLED_NAME)
 
 clean:
 	rm -rf builds/dev builds/beta builds/public builds/release
