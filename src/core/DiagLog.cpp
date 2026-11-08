@@ -19,6 +19,7 @@ os_log_t   g_os   = nullptr;
 FILE*      g_tmpfile = nullptr;
 #endif
 
+#ifndef PRODUCTION
 // Returns the directory containing this dylib, e.g. /private/var/folders/.../T/
 static std::string dylib_dir_for_log() {
     Dl_info info;
@@ -28,6 +29,7 @@ static std::string dylib_dir_for_log() {
     size_t slash = p.rfind('/');
     return slash == std::string::npos ? "" : p.substr(0, slash);
 }
+#endif
 
 } // namespace
 

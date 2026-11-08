@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 
 // Hooks de analisis del protocolo EAC/matchmaking (modulo Network).
 //
@@ -13,3 +14,7 @@
 // Nota: installNetHooks() y installSpoofHooks() son independientes. El orden en Core.mm es
 // Metadata (spoof) primero, Network (EAC) despues.
 void installNetHooks(void);
+
+// Devuelve el account_id capturado de la respuesta /oauth/token.
+// Vacio si el flujo OAuth todavia no ha completado.
+std::string fndiag_get_logged_account_id();

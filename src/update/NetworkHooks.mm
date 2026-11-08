@@ -2,6 +2,7 @@
 #include "core/DiagLog.hpp"
 #include "hooks/ObjcUtil.hpp"
 #include "update/UpdateHooks.hpp"
+#include "network/EacHooks.hpp"
 
 #include <sys/stat.h>
 #include <cstring>
@@ -82,14 +83,18 @@ id patch_request_if_needed(id request) {
     NSString *urlString = [url absoluteString];
     
     if (urlString && [urlString containsString:@"/api/verify/event"]) {
-        log_line("[NetHook] Interceptada petició a verify/event -> Injecció de AccountID activa.");
+        std::string aid_str = fndiag_get_logged_account_id();
+        if (aid_str.empty()) {
+            log_line("[NetHook] verify/event: account_id no disponible aun, omitiendo inyeccion");
+            return request;
+        }
+        NSString *aid = [NSString stringWithUTF8String:aid_str.c_str()];
+        log_line("[NetHook] verify/event -> inyectando account_id: %s", aid_str.c_str());
         NSMutableURLRequest *mutableReq = [request mutableCopy];
-        
-        // 1. Assegurar capçalera AccountID
-        [mutableReq setValue:@"163f1e4f35414184b415f93411ac93a0" forHTTPHeaderField:@"X-Epic-AccountId"];
-        [mutableReq setValue:@"163f1e4f35414184b415f93411ac93a0" forHTTPHeaderField:@"AccountID"];
-        
-        // 2. Si duu un body en JSON, assegurar-nos que inclou l'AccountID per evitar l'error 1001
+
+        [mutableReq setValue:aid forHTTPHeaderField:@"X-Epic-AccountId"];
+        [mutableReq setValue:aid forHTTPHeaderField:@"AccountID"];
+
         NSData *body = [mutableReq HTTPBody];
         if (body) {
             NSError *jsonError = nil;
@@ -97,22 +102,21 @@ id patch_request_if_needed(id request) {
             if ([JSONObject isKindOfClass:[NSMutableDictionary class]] && !jsonError) {
                 NSMutableDictionary *jsonDict = (NSMutableDictionary *)JSONObject;
                 if (!jsonDict[@"accountId"] && !jsonDict[@"AccountID"]) {
-                    jsonDict[@"accountId"] = @"163f1e4f35414184b415f93411ac93a0";
+                    jsonDict[@"accountId"] = aid;
                     NSData *newBody = [NSJSONSerialization dataWithJSONObject:jsonDict options:0 error:nil];
                     if (newBody) {
                         [mutableReq setHTTPBody:newBody];
-                        log_line("[NetHook] AccountID injectat amb èxit dins del JSON Body de verify/event");
+                        log_line("[NetHook] account_id inyectado en JSON body de verify/event");
                     }
                 }
             }
         } else {
-            // Si no hi havia body, creem un JSON bàsic amb l'AccountID per salvar la petició
-            NSDictionary *dict = @{@"accountId": @"163f1e4f35414184b415f93411ac93a0"};
+            NSDictionary *dict = @{@"accountId": aid};
             NSData *newBody = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
             if (newBody) {
                 [mutableReq setHTTPBody:newBody];
                 [mutableReq setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-                log_line("[NetHook] Body creat des de zero amb AccountID per a verify/event");
+                log_line("[NetHook] body creado con account_id para verify/event");
             }
         }
         return mutableReq;

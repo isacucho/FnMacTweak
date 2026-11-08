@@ -5,6 +5,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdint>
+#include <mutex>
+#include <string>
 #include <dlfcn.h>
 #include <dispatch/dispatch.h>
 #include <mach-o/dyld.h>
@@ -15,7 +17,27 @@
 static NSString*        gVerifyMatchData = nil;
 static dispatch_queue_t gVerifyQueue     = NULL;
 
+static std::mutex  g_aid_mutex;
+static std::string g_account_id;
+
 static const char* cstr(NSString* s) { return s ? [s UTF8String] : "(nil)"; }
+
+static void capture_account_id(NSData* body) {
+    NSDictionary* obj = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+    if (![obj isKindOfClass:[NSDictionary class]]) return;
+    NSString* aid = obj[@"account_id"];
+    if (!aid || aid.length == 0) return;
+    {
+        std::lock_guard<std::mutex> lk(g_aid_mutex);
+        g_account_id = [aid UTF8String];
+    }
+    fndiag::log_line("[Auth] account_id captured: %s", [aid UTF8String]);
+}
+
+std::string fndiag_get_logged_account_id() {
+    std::lock_guard<std::mutex> lk(g_aid_mutex);
+    return g_account_id;
+}
 
 static int httpStatus(NSURLSessionTask* task) {
     NSURLResponse* r = task.response;
@@ -153,6 +175,10 @@ static void hookReceiveData(Class cls, SEL sel) {
                 outData = spoof_eac_response(data, task, url);
             }
 
+            if (url && [url containsString:@"oauth/token"]) {
+                capture_account_id(data);
+            }
+
 #ifndef PRODUCTION
             NSHTTPURLResponse* http = [task.response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse*)task.response : nil;
             NSString* ctype = http ? http.allHeaderFields[@"Content-Type"] : nil;
@@ -263,11 +289,7 @@ static void hookURLRequest() {
                             }
                         });
                     }
-                    if ([urlStr containsString:@"verify/event"]) {
-                        fndiag::log_line("[EAC-SUPPRESS] clearing verify/event body (was %lu bytes)",
-                                         (unsigned long)(body ? body.length : 0));
-                        outBody = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
-                    }
+
                 }
                 if ([urlStr containsString:@"oauth/token"]) {
                     NSString* bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
@@ -399,8 +421,8 @@ static NSString* h_b64Enc(NSData* self, SEL _cmd, NSUInteger options) {
 }
 #endif
 
-static void og_installNetHooks(void) {
 #ifndef PRODUCTION
+static void og_installNetHooks(void) {
     MSHookFunction_eac_t mshook = NULL;
     void* handle = dlopen("/usr/lib/libsubstrate.dylib", RTLD_NOW);
     if (!handle) handle = dlopen("/usr/lib/libellekit.dylib", RTLD_NOW);
@@ -417,8 +439,8 @@ static void og_installNetHooks(void) {
         Method m = class_getInstanceMethod(dataCls, @selector(base64EncodedStringWithOptions:));
         if (m) { o_b64Enc = method_getImplementation(m); method_setImplementation(m, (IMP)h_b64Enc); }
     }
-#endif
 }
+#endif
 
 static const uintptr_t kPatchFileOff    = 0x24a8258;
 static const uint8_t   kOrigBytes[4]    = {0xff, 0x03, 0x06, 0xd1};
