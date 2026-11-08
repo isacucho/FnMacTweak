@@ -4,3 +4,13 @@ sessions/
 log.txt
 # Builds: solo los artefactos de release se distribuyen via gh release
 builds/
+
+# Herramientas y runtime de agentes (no trackeado)
+.env
+.env.local
+.env.*.local
+.claude-flow/
+.claude/
+.agents/
+.swarm/
+.mcp.json

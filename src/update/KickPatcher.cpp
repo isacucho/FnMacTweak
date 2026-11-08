@@ -5,8 +5,12 @@
 #include <mach/vm_map.h>
 #include <mach-o/dyld.h>
 #include <cstdint>
+#include <atomic>
+#include <time.h>
 
 namespace fndiag {
+
+std::atomic<uint64_t> g_last_kick_suppressed_ns{0};
 
 // File offset (from IMAGE_BASE=0x100000000) of ClientWasKicked_Implementation.
 // EFortKickReason in x1: 0=NotKicked 1=GenericKick 2=WasBanned
@@ -37,6 +41,8 @@ static void kick_bypass_stub(void* self, int32_t reason) {
         return;
     }
     // Suppress: GenericKick(1=ValidationFailed), EncryptionRequired(3), ClientIdRestriction(5)
+    g_last_kick_suppressed_ns.store(
+        clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), std::memory_order_relaxed);
     log_line("[KickBypass] suppressed reason=%d", reason);
 }
 

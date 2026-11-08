@@ -33,6 +33,7 @@ CPP_SRC := \
     src/update/TerrainPatcher.cpp \
     src/update/KickPatcher.cpp \
     src/update/NmtPatcher.cpp \
+    src/update/NetFailurePatcher.cpp \
     src/input/FpsUnlock.cpp \
     src/input/InputIni.cpp \
     src/input/NativeKbm.cpp \
@@ -45,6 +46,7 @@ MM_SRC := \
     src/network/EacHooks.mm \
     src/update/EngineHooks.mm \
     src/update/NetworkHooks.mm \
+    src/update/ContentPatch.mm \
     src/update/Updater.mm \
     src/input/InputProbe.mm
 

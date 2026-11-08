@@ -12,6 +12,7 @@
 #include "update/TerrainPatcher.hpp"
 #include "update/KickPatcher.hpp"
 #include "update/NmtPatcher.hpp"
+#include "update/NetFailurePatcher.hpp"
 #include "update/UpdateHooks.hpp"
 #include "update/Updater.hpp"
 #include "input/InputHooks.hpp"
@@ -53,6 +54,8 @@ __attribute__((constructor)) static void fncompat_init() {
         // and calls the original only for 2/4 (WasBanned/CrossPlayRestriction).
         fndiag::install_kick_bypass();
         fndiag::install_nmt_patch();
+        fndiag::install_net_failure_patch();
+        fndiag::install_content_patch();
 
         installSpoofHooks();
 

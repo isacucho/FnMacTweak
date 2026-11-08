@@ -178,6 +178,20 @@ void instrument(id delegate) {
 }
 
 id hook_session_factory(id self, SEL cmd, id config_obj, id delegate, id queue) {
+    // Inyectar FnContentLinkProtocol en la config de cada sesion para que el NSURLProtocol
+    // custom intercepte las requests a experience_br (fix NumLoadCustomizationFailed >= 3).
+    if (config_obj) {
+        NSURLSessionConfiguration *cfg = (NSURLSessionConfiguration *)config_obj;
+        Class patchClass = NSClassFromString(@"FnContentLinkProtocol");
+        if (patchClass) {
+            NSMutableArray *protocols = [NSMutableArray arrayWithArray:cfg.protocolClasses ?: @[]];
+            if (![protocols containsObject:patchClass]) {
+                [protocols insertObject:patchClass atIndex:0];
+                cfg.protocolClasses = protocols;
+            }
+        }
+    }
+
     id identifier = config_obj ? send<id>(config_obj, sel("identifier")) : nullptr;
     log_line("session created: delegate=%s config.identifier=%s",
              delegate ? class_getName(object_getClass(delegate)) : "(nil)",

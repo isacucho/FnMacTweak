@@ -24,4 +24,10 @@ void install_engine_hooks();
 // el UUID del contenedor al identificador. Ver src/update/SessionOverride.cpp.
 void install_session_override();
 
+// Registra FnContentLinkProtocol; la inyeccion en cada NSURLSession se hace en
+// hook_session_factory (NetworkHooks.mm). Debe llamarse antes de install_network_hooks().
+// Ver src/update/ContentPatch.mm para la raiz: HTTP 400 en experience_br causa
+// NumLoadCustomizationFailed >= 3 que expulsa al jugador del juego (v2.0.32 bug).
+void install_content_patch();
+
 } // namespace fndiag
