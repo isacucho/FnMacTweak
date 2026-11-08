@@ -256,6 +256,12 @@ static NSUInteger h_activeProcessorCount(id self, SEL _cmd) {
     return (NSUInteger)g_profile.physicalcpu;
 }
 
+static IMP o_isiOSAppOnMac = NULL;
+static BOOL h_isiOSAppOnMac(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    return NO;
+}
+
 static IMP o_deviceModel = NULL;
 static NSString* h_deviceModel(id self, SEL _cmd) {
     (void)self; (void)_cmd;
@@ -287,6 +293,41 @@ static void h_checkExpectedBundleID(id self, SEL _cmd, id arg1) { (void)self; (v
 static IMP o_FIROptions_bundleID = NULL;
 static NSString* h_FIROptions_bundleID(id self, SEL _cmd) { (void)self; (void)_cmd; return kForcedBundleId; }
 
+// Runtime patch: isiOSAppOnMac -> isiOSAppOnXac in EOSSDK __TEXT.
+// Breaks the selector so objc_msgSend returns nil/0 for any lazy call.
+// Runs from our constructor (dylib pos 40); only effective if EOSSDK
+// hasn't already cached YES from an early +load call (pos 25).
+static void patchEOSSDKSelectorString(void) {
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const char* name = _dyld_get_image_name(i);
+        if (!name || !strstr(name, "EOSSDK")) continue;
+
+        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+        // isiOSAppOnMac string is at file offset 0xBE648F in EOSSDK __TEXT.
+        // 'M' is at +10. slide == load_base for a dylib with preferred base 0.
+        uint8_t* str = (uint8_t*)(slide + 0xBE648FL);
+
+        if (memcmp(str, "isiOSAppOn", 10) != 0 || str[10] != 'M') {
+            LOG_I("Spoof", "EOSSDK selstr: unexpected bytes at 0x%tx (slide=0x%tx)", (uintptr_t)str, (uintptr_t)slide);
+            break;
+        }
+
+        vm_address_t page = (vm_address_t)str & ~((vm_size_t)vm_page_size - 1);
+        kern_return_t kr = vm_protect(mach_task_self(), page, (vm_size_t)vm_page_size,
+                                      FALSE, VM_PROT_READ | VM_PROT_WRITE);
+        if (kr != KERN_SUCCESS) {
+            LOG_I("Spoof", "EOSSDK selstr: vm_protect(W) failed kr=%d", kr);
+            break;
+        }
+        str[10] = 'X'; // isiOSAppOnMac -> isiOSAppOnXac
+        __builtin___clear_cache((char*)str, (char*)str + 13);
+        vm_protect(mach_task_self(), page, (vm_size_t)vm_page_size, FALSE, VM_PROT_READ);
+        LOG_I("Spoof", "EOSSDK selstr patched: isiOSAppOnMac->isiOSAppOnXac (slide=0x%tx)", (uintptr_t)slide);
+        break;
+    }
+}
+
 static IMP o_backgroundRefreshStatus = NULL;
 static NSInteger h_backgroundRefreshStatus(id self, SEL _cmd) { (void)self; (void)_cmd; return 1; }
 
@@ -303,6 +344,7 @@ static BOOL h_fileExistsAtPathIsDirectory(id self, SEL _cmd, NSString* path, BOO
 
 void installSpoofHooks(void) {
     @autoreleasepool {
+        patchEOSSDKSelectorString(); // before any hook - patches EOSSDK __TEXT in memory
         deriveDeviceProfile();   // must run before any hook reads g_profile
 
         unsetenv("DYLD_INSERT_LIBRARIES");
@@ -371,6 +413,7 @@ void installSpoofHooks(void) {
 
         using fndiag::objc::swizzle;
         swizzle(NSClassFromString(@"NSProcessInfo"), @selector(activeProcessorCount), (IMP)h_activeProcessorCount, &o_activeProcessorCount);
+        swizzle(NSClassFromString(@"NSProcessInfo"), @selector(isiOSAppOnMac),        (IMP)h_isiOSAppOnMac,         &o_isiOSAppOnMac);
         swizzle(NSClassFromString(@"UIDevice"),      @selector(model),                (IMP)h_deviceModel,          &o_deviceModel);
         swizzle(NSClassFromString(@"UIDevice"),      @selector(systemName),           (IMP)h_systemName,           &o_systemName);
         swizzle(NSClassFromString(@"UIDevice"),      @selector(systemVersion),        (IMP)h_systemVersion,        &o_systemVersion);
