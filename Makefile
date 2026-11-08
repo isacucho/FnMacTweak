@@ -35,7 +35,8 @@ CPP_SRC := \
     src/update/NmtPatcher.cpp \
     src/input/FpsUnlock.cpp \
     src/input/InputIni.cpp \
-    src/input/NativeKbm.cpp
+    src/input/NativeKbm.cpp \
+    src/eos/EosHooks.cpp
 
 # Fuentes ObjC++ (compilados con -fobjc-arc)
 MM_SRC := \
