@@ -19,7 +19,7 @@ static constexpr uint32_t kBnfPrologue    = 0xd10203ffU;
 // String used to locate BNF via ADRP+ADD scan in __TEXT,__text
 static constexpr char     kBnfString[]    = "BroadcastNetworkFailure";
 // Scan budget: how far back to walk from ADRP+ADD to find function prologue
-static constexpr size_t   kMaxWalkback    = 0x1000U;
+static constexpr size_t   kMaxWalkback    = 0x8000U;
 // Island size: LDR X16,[PC+8] + BR X16 + .quad stub_va
 static constexpr size_t   kIslandSize     = 16U;
 // NOP (d503201f) - island candidate word
@@ -142,6 +142,9 @@ static uintptr_t find_bnf_via_string(uintptr_t text_start, size_t text_size,
     uint32_t  str_off  = static_cast<uint32_t>(str_va & 0xFFF);
     uintptr_t text_end = text_start + text_size;
 
+    int adrp_page_hits = 0;  // ADRP instructions landing on str_page
+    int add_full_hits  = 0;  // ADRP+ADD pairs with matching imm12
+
     for (uintptr_t pc = text_start; pc + 8 <= text_end; pc += 4) {
         const uint32_t insn = *reinterpret_cast<const volatile uint32_t*>(pc);
 
@@ -156,15 +159,17 @@ static uintptr_t find_bnf_via_string(uintptr_t text_start, size_t text_size,
                               static_cast<int32_t>(((immhi << 2) | immlo) << 11)) >> 11;
         uintptr_t adrp_res = (pc & ~0xFFFULL) + (imm21 << 12);
         if (adrp_res != str_page) continue;
+        ++adrp_page_hits;
 
-        // Next: ADD Xrd, Xrd, #str_off  (64-bit ADD immediate: 0x91......, sf=1, op=0, S=0)
+        // Next: ADD Xd, Xn, #str_off  (64-bit ADD immediate: 0x91......, sf=1, op=0, S=0)
+        // Allow any destination register Xd, but require source Xn == rd (ADRP destination).
+        // Clang may emit ADRP X8, page; ADD X0, X8, #off (Rd != Rn), so we do NOT check Rd==rd.
         const uint32_t next = *reinterpret_cast<const volatile uint32_t*>(pc + 4);
-        // mask: opcode[31:22] = 1001 0001 00, check Rd==Rn==rd and imm12==str_off
         uint32_t add_opcode = next >> 22;
-        if (add_opcode != 0x244U) continue;             // 0x91>>2 = 0x244
-        if ((next & 0x1FU) != rd) continue;             // Rd == rd
-        if (((next >> 5) & 0x1FU) != rd) continue;     // Rn == rd
+        if (add_opcode != 0x244U) continue;             // opcode[31:22] = 1001 0001 00
+        if (((next >> 5) & 0x1FU) != rd) continue;     // Rn must == rd
         if (((next >> 10) & 0xFFFU) != str_off) continue;
+        ++add_full_hits;
 
         // Found ADRP+ADD loading str_va. Walk back up to kMaxWalkback
         // looking for kBnfPrologue (function entry SUB SP,SP,#0x80).
@@ -175,8 +180,11 @@ static uintptr_t find_bnf_via_string(uintptr_t text_start, size_t text_size,
                 return back;
             if (back == text_start) break;
         }
-        // No prologue found within budget; keep scanning for more ADRP+ADD pairs
+        log_line("[NetFailurePatch] ADRP+ADD match at 0x%lx but no prologue in %zuKB",
+                 (long)pc, kMaxWalkback / 1024);
     }
+    log_line("[NetFailurePatch] find_bnf_via_string: adrp_page=%d add_full=%d str_page=0x%lx off=0x%x",
+             adrp_page_hits, add_full_hits, (long)str_page, str_off);
     return 0;
 }
 
