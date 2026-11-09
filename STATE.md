@@ -24,8 +24,8 @@ Tras un kick reason=144:
 | V2.1.24 | BeginSpectating con self ViewTarget | 90s freeze, lobby limpio (no NCL). A veces 22s (inconsistente) |
 | V2.1.25 | Igual + flood-cap 25s | NCL screen a t=25s (BeginSpectating falla, ConnectionLost pasa sin spectate activo) |
 | V2.1.26 | Revert flood-cap, supr. indefinida + log BNF types | 90s freeze, lobby limpio. BNF type= nunca aparecio (ConnectionTimeout bypasa nuestro BL site) |
-| V2.1.27 | Synthetic ConnectionTimeout via dispatch_after(25s) | Pendiente test en partida |
-| V2.2.0 | vtable patch RejoinViaSessionInternal, bCanRejoinSession bypass | Pendiente test |
+| V2.1.27 | Synthetic ConnectionTimeout via dispatch_after(25s) | VERIFICADO 2026-11-10: lobby limpio a 25s |
+| V2.2.0 | vtable patch RejoinViaSessionInternal, bCanRejoinSession bypass | Hook instalado OK, RejoinViaSessionInternal nunca llamado por ConnectionTimeout path. Falta trigger explicito. |
 
 ## V2.1.27 - que cambia
 

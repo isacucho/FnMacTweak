@@ -151,10 +151,14 @@ v2.0.34 (Z bump: fix en network failure path).
       ConnectionTimeout bypasa nuestro hook (distinto BL site en UNetConnection::Tick).
       kConnectionTimeout=4 confirmado por inspeccion directa del bloque ENetworkFailure
       strings en el binario (orden: 3=ConnectionLost 4=ConnectionTimeout).
-- [ ] V2.1.27: synthetic ConnectionTimeout via dispatch_after(25s, main_queue). Pendiente
-      test en partida. Si el lobby return ocurre a 25s en lugar de 90s: EXITO.
-- [ ] V2.2.0: vtable patch de RejoinViaSessionInternal (file_off 0x805be18, vtable
-      entry file_off 0xd4a4e70 __DATA_CONST,__const). rejoin_bypass_stub fuerza
-      [self+0x2a]=1 (bCanRejoinSession) antes del guard check a fn+0x2c.
-      Pendiente: verificar si el engine llama a RejoinViaSessionInternal tras
-      ConnectionTimeout sintetico. Si no, se necesita un trigger explicito.
+- [x] V2.1.27: synthetic ConnectionTimeout via dispatch_after(25s, main_queue). VERIFICADO
+      2026-11-10: "[NetFailurePatch] synthetic ConnectionTimeout firing (25s early)" aparece
+      a exactamente dk=25s. Lobby return limpio sin NCL screen. EXITO.
+- [ ] V2.2.0: vtable patch de RejoinViaSessionInternal instalado y verificado en startup.
+      CONFIRMADO 2026-11-10: "[Reconnect] RejoinViaSessionInternal called" NUNCA aparece.
+      El path ConnectionTimeout -> ReturningToFrontEnd es directo al lobby y NO pasa por
+      RejoinViaSessionInternal. El vtable hook existe pero no tiene trigger.
+      SIGUIENTE PASO: llamar RejoinViaSessionInternal explicitamente desde kick_bypass_stub.
+      Requiere encontrar UFortRejoinCheck* desde AFortPlayerControllerAthena (self en kick).
+      Buscar con REA: miembro RejoinCheck en PlayerController, offset desde self.
+      Alternativa: buscar GEngine->GameInstance->RejoinCheck si no es miembro directo.
