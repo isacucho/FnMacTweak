@@ -44,14 +44,26 @@ file builds/dev/FnMacKickFix-V*.dylib
 - Y: nueva feature (hook nuevo, nuevo subsistema)
 - Z: bugfix / ajuste de comportamiento existente
 
-Proxima: v2.0.45 (verificar supresion de ConnectionLost UI en partida).
+Proxima: pendiente test en partida de lobby return en 25s (V2.1.27).
 
-Actual en Makefile: `-DMODULE_VERSION="2.0.44"`
+Actual en VERSION: `2.2.0`
 
 ## Log de diagnostico
 
-El log vive en `~/Documents/FnDiag.log` dentro del container de Fortnite.
-Subsistema OSLog: `com.alexgrdev.fnmackickfix`.
+El log vive en (UUID puede cambiar si se reinstala via Sideloadly):
+`~/Library/Containers/0F16E856-1C80-4448-9C65-ED3A8E8DA5E9/Data/Documents/FnDiag.log`
+
+Si cambia el UUID, encontrarlo con:
+```bash
+lsof -p $(pgrep FortniteClient | head -1) 2>/dev/null | grep FnDiag.log | awk '{print $NF}'
+```
+
+Seguimiento en tiempo real:
+```bash
+tail -f ~/Library/Containers/0F16E856-1C80-4448-9C65-ED3A8E8DA5E9/Data/Documents/FnDiag.log | grep -E "NetFailurePatch|KickBypass|KickPatch|BNF|slot|armed"
+```
+
+Subsistema OSLog (NetHook, EAC-Auth): `com.alexgrdev.fnmackickfix`.
 
 Filtrar en tiempo real:
 ```bash

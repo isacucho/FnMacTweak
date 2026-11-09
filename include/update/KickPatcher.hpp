@@ -10,4 +10,5 @@ namespace fndiag {
 extern std::atomic<uint64_t> g_last_kick_suppressed_ns;
 
 void install_kick_bypass();
+
 } // namespace fndiag

@@ -1,5 +1,5 @@
 #include "update/NetFailurePatcher.hpp"
-#include "update/KickPatcher.hpp"
+#include "update/KickPatcher.hpp"  // g_last_kick_suppressed_ns
 #include "core/DiagLog.hpp"
 
 #include <mach/mach.h>
@@ -7,6 +7,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <libkern/OSCacheControl.h>
+#include <dispatch/dispatch.h>
 #include <cstdint>
 #include <cstring>
 #include <atomic>
@@ -16,64 +17,116 @@ namespace fndiag {
 
 // SUB sp, sp, #0x80 - prologue of UEngine::BroadcastNetworkFailure
 static constexpr uint32_t kBnfPrologue    = 0xd10203ffU;
+// Known file offset of BNF from MachO base (Fortnite v2.0.32 / build 43)
+static constexpr uintptr_t kBnfOffset     = 0x5642c74UL;
 // String used to locate BNF via ADRP+ADD scan in __TEXT,__text
 static constexpr char     kBnfString[]    = "BroadcastNetworkFailure";
 // Scan budget: how far back to walk from ADRP+ADD to find function prologue
 static constexpr size_t   kMaxWalkback    = 0x8000U;
-// Island size: LDR X16,[PC+8] + BR X16 + .quad stub_va
-static constexpr size_t   kIslandSize     = 16U;
-// NOP (d503201f) - island candidate word
-static constexpr uint32_t kNop            = 0xd503201fU;
-// ENetworkFailure::Type value for ConnectionLost
-static constexpr int32_t  kConnectionLost = 3;
-// Window: suppress ConnectionLost only within 500ms of a suppressed kick
-static constexpr uint64_t kWindowNs       = 500000000ULL;
+// ENetworkFailure enum values (confirmed from binary ENetworkFailure strings block):
+// 0=NetDriverAlreadyExists 1=NetDriverCreateFailure 2=NetDriverListenFailure
+// 3=ConnectionLost 4=ConnectionTimeout 5=FailureReceived ...
+static constexpr int32_t  kConnectionLost    = 3;
+static constexpr int32_t  kConnectionTimeout = 4;
+// Flood suppression timing:
+// kInitWindowNs: suppress for 2s after kick before flood is detected.
+// kFloodGapNs: inter-event gap above this means flood ended.
+// kMaxSupprNs: init-only safety cap (no flood detected).
+// kEarlyTimeoutNs: at this delay post-kick, synthesize ConnectionTimeout on main queue
+//   to cut the 90s freeze. ConnectionTimeout -> clean lobby return (no NCL screen).
+//   ConnectionTimeout bypasses our BL-site hook (different call site in UNetConnection::Tick),
+//   so we can't intercept it - we replay it synthetically instead.
+static constexpr uint64_t kInitWindowNs    = 2000000000ULL;   // 2s
+static constexpr uint64_t kFloodGapNs      = 2000000000ULL;   // 2s inter-event = flood over
+static constexpr uint64_t kMaxSupprNs      = 10000000000ULL;  // 10s init-only safety timeout
+static constexpr uint64_t kEarlyTimeoutNs  = 25000000000ULL;  // 25s: synthetic ConnectionTimeout
+// ARM64 encoding of island instructions (version-independent)
+static constexpr uint32_t kIslandCbzX16  = 0xB4000050U; // CBZ X16, +8 (skip BR if slot==0)
+static constexpr uint32_t kIslandBrX16   = 0xD61F0200U; // BR X16
 
 using BnfFn = void (*)(void* self, void* world, void* net_driver,
                         int32_t failure_type, void* error_string);
 static BnfFn g_orig_bnf = nullptr;
+// Gap-based flood detection: tracks last suppressed ConnectionLost timestamp.
+static std::atomic<uint64_t> g_last_cl_ns{0};
+
+// Synthetic ConnectionTimeout state.
+// g_dispatched_for_kick_ns: kick timestamp for which we already dispatched;
+//   reset when a new kick timestamp is seen (handles back-to-back matches).
+// g_timeout_dispatched: guard to dispatch exactly once per kick.
+// g_saved_bnf_{self,world,driver}: BNF params captured on first ConnectionLost suppress.
+static std::atomic<uint64_t>  g_dispatched_for_kick_ns{0};
+static std::atomic<bool>      g_timeout_dispatched{false};
+static std::atomic<uintptr_t> g_saved_bnf_self{0};
+static std::atomic<uintptr_t> g_saved_bnf_world{0};
+static std::atomic<uintptr_t> g_saved_bnf_driver{0};
+
+// Minimal empty FString for the synthetic BNF call.
+// FString = { TCHAR* Data, int32 Num, int32 Max }. Num==0 -> operator*() returns TEXT("").
+static const struct { void* data; int32_t num; int32_t max; }
+    s_empty_fstr = { nullptr, 0, 0 };
 
 static void bnf_bypass_stub(void* self, void* world, void* net_driver,
                               int32_t failure_type, void* error_string) {
     if (failure_type == kConnectionLost) {
         uint64_t last_kick = g_last_kick_suppressed_ns.load(std::memory_order_relaxed);
         if (last_kick != 0) {
-            uint64_t now      = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-            uint64_t delta_ns = (now > last_kick) ? (now - last_kick) : 0;
-            if (delta_ns < kWindowNs) {
-                log_line("[NetFailurePatch] ConnectionLost suppressed "
-                         "(delta=%llums after suppressed kick)",
-                         (unsigned long long)(delta_ns / 1000000ULL));
+            uint64_t now     = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+            uint64_t last_cl = g_last_cl_ns.load(std::memory_order_relaxed);
+            uint64_t dk      = now - last_kick;
+            bool in_flood    = last_cl != 0 && (now - last_cl) < kFloodGapNs;
+            bool in_init     = dk < kInitWindowNs;
+
+            if (in_flood || (in_init && dk < kMaxSupprNs)) {
+                g_last_cl_ns.store(now, std::memory_order_relaxed);
+
+                // If this is a new kick (kick timestamp changed), reset dispatch state.
+                uint64_t prev_kick = g_dispatched_for_kick_ns.load(std::memory_order_relaxed);
+                if (prev_kick != last_kick) {
+                    g_timeout_dispatched.store(false, std::memory_order_release);
+                    g_dispatched_for_kick_ns.store(last_kick, std::memory_order_release);
+                }
+
+                // Dispatch synthetic ConnectionTimeout once per kick, on first suppress.
+                if (!g_timeout_dispatched.exchange(true, std::memory_order_acq_rel)) {
+                    g_saved_bnf_self.store((uintptr_t)self,       std::memory_order_relaxed);
+                    g_saved_bnf_world.store((uintptr_t)world,     std::memory_order_relaxed);
+                    g_saved_bnf_driver.store((uintptr_t)net_driver, std::memory_order_relaxed);
+                    dispatch_after(
+                        dispatch_time(DISPATCH_TIME_NOW, (int64_t)kEarlyTimeoutNs),
+                        dispatch_get_main_queue(), ^{
+                            void* s = (void*)g_saved_bnf_self.load(std::memory_order_relaxed);
+                            void* w = (void*)g_saved_bnf_world.load(std::memory_order_relaxed);
+                            void* d = (void*)g_saved_bnf_driver.load(std::memory_order_relaxed);
+                            BnfFn fn = g_orig_bnf;
+                            if (!s || !fn) {
+                                log_line("[NetFailurePatch] synthetic ConnectionTimeout: stale params, skip");
+                                return;
+                            }
+                            log_line("[NetFailurePatch] synthetic ConnectionTimeout firing (25s early)");
+                            fn(s, w, d, kConnectionTimeout, (void*)&s_empty_fstr);
+                        });
+                    log_line("[NetFailurePatch] ConnectionLost suppressed (dk=%llums%s) - 25s timer armed",
+                             (unsigned long long)(dk / 1000000ULL),
+                             in_flood ? " flood" : " init");
+                } else {
+                    log_line("[NetFailurePatch] ConnectionLost suppressed (dk=%llums%s)",
+                             (unsigned long long)(dk / 1000000ULL),
+                             in_flood ? " flood" : " init");
+                }
                 return;
             }
-            log_line("[NetFailurePatch] ConnectionLost NOT suppressed "
-                     "(delta=%llums > 500ms window)",
-                     (unsigned long long)(delta_ns / 1000000ULL));
+            const char* reason = in_flood ? " flood-ended" : " init-timeout";
+            log_line("[NetFailurePatch] ConnectionLost NOT suppressed (dk=%llums%s)",
+                     (unsigned long long)(dk / 1000000ULL), reason);
         }
+    } else {
+        uint64_t last_kick = g_last_kick_suppressed_ns.load(std::memory_order_relaxed);
+        uint64_t dk = last_kick ? (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - last_kick) : 0;
+        log_line("[NetFailurePatch] BNF type=%d dk=%llums (pass-through)",
+                 failure_type, (unsigned long long)(dk / 1000000ULL));
     }
     if (g_orig_bnf) g_orig_bnf(self, world, net_driver, failure_type, error_string);
-}
-
-// Write len bytes into a __TEXT page (W^X compliant: RW then RE, never RWX).
-// Covers a single 16KB page; caller must ensure va..va+len fits in one page.
-static bool write_text_region(uintptr_t va, const void* data, size_t len) {
-    mach_vm_address_t page = va & ~((mach_vm_address_t)0x3FFFULL);
-    kern_return_t kr = vm_protect(mach_task_self(),
-                                  static_cast<vm_address_t>(page), 0x4000,
-                                  false, VM_PROT_READ | VM_PROT_WRITE);
-    if (kr != KERN_SUCCESS) {
-        log_line("[NetFailurePatch] vm_protect(RW) FAIL kr=%d va=0x%lx", kr, (long)va);
-        return false;
-    }
-    memcpy(reinterpret_cast<void*>(va), data, len);
-    sys_icache_invalidate(reinterpret_cast<void*>(va), len);
-    __asm__ volatile("isb" ::: "memory");
-    kr = vm_protect(mach_task_self(),
-                    static_cast<vm_address_t>(page), 0x4000,
-                    false, VM_PROT_READ | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS)
-        log_line("[NetFailurePatch] vm_protect(RE) FAIL kr=%d va=0x%lx", kr, (long)va);
-    return true;
 }
 
 // Locate __TEXT,__text section: returns start VA and size.
@@ -161,14 +214,19 @@ static uintptr_t find_bnf_via_string(uintptr_t text_start, size_t text_size,
         if (adrp_res != str_page) continue;
         ++adrp_page_hits;
 
-        // Next: ADD Xd, Xn, #str_off  (64-bit ADD immediate: 0x91......, sf=1, op=0, S=0)
-        // Allow any destination register Xd, but require source Xn == rd (ADRP destination).
-        // Clang may emit ADRP X8, page; ADD X0, X8, #off (Rd != Rn), so we do NOT check Rd==rd.
-        const uint32_t next = *reinterpret_cast<const volatile uint32_t*>(pc + 4);
-        uint32_t add_opcode = next >> 22;
-        if (add_opcode != 0x244U) continue;             // opcode[31:22] = 1001 0001 00
-        if (((next >> 5) & 0x1FU) != rd) continue;     // Rn must == rd
-        if (((next >> 10) & 0xFFFU) != str_off) continue;
+        // Look ahead up to 4 instructions for ADD Xd, Xrd, #str_off.
+        // The compiler often interleaves ADRP with unrelated instructions to hide
+        // the ADRP latency, so the ADD is not always at pc+4.
+        bool add_found = false;
+        for (uintptr_t la = pc + 4; la <= pc + 16 && la + 4 <= text_end; la += 4) {
+            const uint32_t nx = *reinterpret_cast<const volatile uint32_t*>(la);
+            if ((nx >> 22) != 0x244U) continue;         // ADD 64-bit imm (sh=0)
+            if (((nx >> 5) & 0x1FU) != rd) continue;    // Rn == ADRP Rd
+            if (((nx >> 10) & 0xFFFU) != str_off) continue;
+            add_found = true;
+            break;
+        }
+        if (!add_found) continue;
         ++add_full_hits;
 
         // Found ADRP+ADD loading str_va. Walk back up to kMaxWalkback
@@ -186,73 +244,6 @@ static uintptr_t find_bnf_via_string(uintptr_t text_start, size_t text_size,
     log_line("[NetFailurePatch] find_bnf_via_string: adrp_page=%d add_full=%d str_page=0x%lx off=0x%x",
              adrp_page_hits, add_full_hits, (long)str_page, str_off);
     return 0;
-}
-
-// Scan text_start..text_start+text_size for a run of kNopRunNeeded NOP words.
-// The island must not cross a 16KB page boundary (write_text_region limit).
-static uintptr_t find_nop_island(uintptr_t text_start, size_t text_size) {
-    uintptr_t end = text_start + text_size;
-    if (text_size < kIslandSize) return 0;
-    end -= kIslandSize;
-    for (uintptr_t p = text_start; p <= end; p += 4) {
-        bool ok = true;
-        for (size_t i = 0; i < kIslandSize; i += 4) {
-            if (*reinterpret_cast<const volatile uint32_t*>(p + i) != kNop) {
-                ok = false; break;
-            }
-        }
-        if (!ok) continue;
-        // Reject if island spans two 16KB pages
-        if ((p & ~0x3FFFULL) != ((p + kIslandSize - 1) & ~0x3FFFULL)) continue;
-        return p;
-    }
-    return 0;
-}
-
-// Write a 16-byte position-independent island at island_va:
-//   LDR X16, [PC+8]   ; load stub_va from offset +8
-//   BR  X16           ; tail-call to stub
-//   .quad stub_va     ; 8-byte literal
-static bool write_island(uintptr_t island_va, uintptr_t stub_va) {
-    uint8_t buf[16];
-    // LDR X16, [PC+8]: opcode 0x58 | (imm19 << 5) | Rd; imm19=2, Rd=16
-    uint32_t ldr = 0x58000050U; // LDR X16, [PC+8]
-    uint32_t br  = 0xD61F0200U; // BR X16
-    memcpy(buf,     &ldr,     4);
-    memcpy(buf + 4, &br,      4);
-    memcpy(buf + 8, &stub_va, 8);
-    return write_text_region(island_va, buf, 16);
-}
-
-// Scan text_start..text_start+text_size for BL instructions targeting bnf_va.
-// Redirect each one to island_va. Returns number of BL instructions patched.
-// Only patches if BL range to island fits in 26-bit signed offset (±128MB).
-static int scan_bl_to_bnf(uintptr_t text_start, size_t text_size,
-                            uintptr_t bnf_va, uintptr_t island_va) {
-    uintptr_t text_end = text_start + text_size;
-    int count = 0;
-    for (uintptr_t pc = text_start; pc + 4 <= text_end; pc += 4) {
-        const uint32_t insn = *reinterpret_cast<const volatile uint32_t*>(pc);
-        // BL: bits[31:26] == 0b100101
-        if ((insn >> 26) != 0x25U) continue;
-        // Decode 26-bit signed immediate (units of 4 bytes)
-        int32_t imm26 = static_cast<int32_t>(insn << 6) >> 6;
-        uintptr_t target = pc + static_cast<uintptr_t>(static_cast<int64_t>(imm26) * 4);
-        if (target != bnf_va) continue;
-        // Encode new BL to island
-        int64_t disp = static_cast<int64_t>(island_va) - static_cast<int64_t>(pc);
-        if (disp < -(1LL << 27) || disp >= (1LL << 27)) {
-            log_line("[NetFailurePatch] BL at 0x%lx out of range to island 0x%lx (disp=%lld)",
-                     (long)pc, (long)island_va, (long long)disp);
-            continue;
-        }
-        uint32_t new_insn = (0x25U << 26) | (static_cast<uint32_t>(disp / 4) & 0x3FFFFFFU);
-        if (write_text_region(pc, &new_insn, 4)) {
-            ++count;
-            log_line("[NetFailurePatch] BL patched 0x%lx -> island 0x%lx", (long)pc, (long)island_va);
-        }
-    }
-    return count;
 }
 
 // Patch a single 8-byte pointer slot in a DATA segment (vtable entry).
@@ -305,46 +296,116 @@ void install_net_failure_patch() {
         return;
     }
 
-    // --- 2. Find BroadcastNetworkFailure VA via string anchor ---
-    uintptr_t str_va = find_bnf_string_va(mh, slide);
+    // --- 2. Find BroadcastNetworkFailure VA ---
+    // Primary: known file offset (fast, reliable for the target build).
+    // Fallback: ADRP+ADD string-anchor scan (version-independent but slower).
     uintptr_t bnf_va = 0;
-    if (str_va) {
-        bnf_va = find_bnf_via_string(text_start, text_size, str_va);
+    {
+        uintptr_t candidate = base + kBnfOffset;
+        uint32_t pro = *reinterpret_cast<const volatile uint32_t*>(candidate);
+        if (pro == kBnfPrologue) {
+            bnf_va = candidate;
+            log_line("[NetFailurePatch] BNF via fixed offset 0x%lx (slide=0x%lx)",
+                     (long)bnf_va, (long)slide);
+        } else {
+            log_line("[NetFailurePatch] fixed offset 0x%lx bad prologue=0x%08x, trying string scan",
+                     (long)candidate, pro);
+        }
     }
     if (!bnf_va) {
-        log_line("[NetFailurePatch] BNF not found (str_va=0x%lx)", (long)str_va);
+        uintptr_t str_va = find_bnf_string_va(mh, slide);
+        if (str_va) bnf_va = find_bnf_via_string(text_start, text_size, str_va);
+        if (bnf_va) {
+            uint32_t pro = *reinterpret_cast<const volatile uint32_t*>(bnf_va);
+            if (pro != kBnfPrologue) {
+                log_line("[NetFailurePatch] string scan 0x%lx bad prologue=0x%08x",
+                         (long)bnf_va, pro);
+                bnf_va = 0;
+            } else {
+                log_line("[NetFailurePatch] BNF via string scan 0x%lx (str=0x%lx)",
+                         (long)bnf_va, (long)str_va);
+            }
+        }
+    }
+    if (!bnf_va) {
+        log_line("[NetFailurePatch] BNF not found (slide=0x%lx)", (long)slide);
         return;
     }
-    // Verify prologue at found address
-    uint32_t pro = *reinterpret_cast<const volatile uint32_t*>(bnf_va);
-    if (pro != kBnfPrologue) {
-        log_line("[NetFailurePatch] BNF found at 0x%lx but prologue=0x%08x (unexpected)",
-                 (long)bnf_va, pro);
-        return;
-    }
-    log_line("[NetFailurePatch] BNF located: 0x%lx (str=0x%lx slide=0x%lx)",
-             (long)bnf_va, (long)str_va, (long)slide);
 
     uintptr_t stub_va = reinterpret_cast<uintptr_t>(bnf_bypass_stub);
 
-    // --- 3. Find NOP island in __TEXT,__text ---
-    uintptr_t island_va = find_nop_island(text_start, text_size);
+    // --- 3. Disk-island fast path: populate DATA slot, no __TEXT write needed ---
+    // patch_binary.py installs a 20-byte ADRP+LDR+CBZ+BR+RET island in the Mach-O
+    // padding before __TEXT,__text. Its LDR loads a pointer from a __bss slot (zero on
+    // disk) which we fill with stub_va at runtime. The BL call sites already point to
+    // this island after patch_binary.py runs. Writing the DATA slot arms the hook.
+    // __DATA has maxprot=rw- so patch_data_ptr() works; no __TEXT vm_protect needed.
+    //
+    // Dynamic island scan: instead of hardcoded offsets (kPaddingIslandOff, kDataSlotOff,
+    // kDiskIslandMagic), scan the Mach-O padding area for the ADRP+LDR+CBZ+BR pattern.
+    // This decouples the dylib from binary-specific constants that change each update.
+    // Only patch_binary.py needs re-running after an Epic update (no dylib recompile).
     bool trampoline_armed = false;
-    if (!island_va) {
-        log_line("[NetFailurePatch] no NOP island found in __TEXT,__text (%zu bytes)",
-                 text_size);
-    } else {
-        // --- 4. Write island ---
-        if (write_island(island_va, stub_va)) {
-            g_orig_bnf = reinterpret_cast<BnfFn>(bnf_va);
-            // --- 5. Scan __TEXT,__text for BL→bnf_va, redirect to island ---
-            int bl_count = scan_bl_to_bnf(text_start, text_size, bnf_va, island_va);
-            trampoline_armed = (bl_count > 0);
-            log_line("[NetFailurePatch] dynamic patch: island=0x%lx bl_patched=%d",
-                     (long)island_va, bl_count);
-        } else {
-            log_line("[NetFailurePatch] island write FAILED at 0x%lx", (long)island_va);
+    {
+        // Padding: from end of load commands to start of __TEXT,__text.
+        // Subtract 16 bytes from the computed start: patch_binary.py may place the island
+        // up to one instruction (4 bytes) before sizeofcmds ends due to alignment slack.
+        // Starting 16 bytes early is harmless (we validate the full ADRP+LDR+CBZ+BR pattern).
+        uintptr_t pad_start_raw = base + sizeof(mach_header_64) +
+                              reinterpret_cast<const mach_header_64*>(mh)->sizeofcmds;
+        uintptr_t pad_start = (pad_start_raw >= base + 16) ? pad_start_raw - 16 : base;
+        uintptr_t pad_end   = text_start;
+        uintptr_t slot_va   = 0;
+
+        for (uintptr_t p = pad_start; p + 20 <= pad_end; p += 4) {
+            const uint32_t* w = reinterpret_cast<const uint32_t*>(p);
+            // w[0]: ADRP X16  -> bits[31,28:24]=1,10000; Rd=16(0x10)
+            if ((w[0] & 0x9F00001FU) != 0x90000010U) continue;
+            // w[1]: LDR X16, [X16, #imm12*8]  -> bits[31:22]=0b1111 1001 01, Rn=16, Rt=16
+            if ((w[1] & 0xFFC003FFU) != 0xF9400210U) continue;
+            // w[2]: CBZ X16, +8  = 0xB4000050
+            if (w[2] != kIslandCbzX16) continue;
+            // w[3]: BR X16  = 0xD61F0200
+            if (w[3] != kIslandBrX16)  continue;
+
+            // Decode DATA slot VA from ADRP + LDR
+            uint32_t immhi = (w[0] >> 5) & 0x7FFFFU;
+            uint32_t immlo = (w[0] >> 29) & 0x3U;
+            int64_t  imm21 = static_cast<int64_t>(
+                                 static_cast<int32_t>(((immhi << 2) | immlo) << 11)) >> 11;
+            uintptr_t adrp_res = (p & ~0xFFFULL) + (imm21 << 12);
+            uint32_t  imm12    = (w[1] >> 10) & 0xFFFU;
+            slot_va = adrp_res + (imm12 * 8);  // 64-bit LDR scales by 8
+            log_line("[NetFailurePatch] disk-island found at 0x%lx slot=0x%lx",
+                     (long)p, (long)slot_va);
+            break;
         }
+
+        if (slot_va) {
+            if (patch_data_ptr(slot_va, stub_va)) {
+                g_orig_bnf = reinterpret_cast<BnfFn>(bnf_va);
+                trampoline_armed = true;
+                log_line("[NetFailurePatch] disk-island: slot 0x%lx -> stub (armed)",
+                         (long)slot_va);
+            } else {
+                log_line("[NetFailurePatch] disk-island: slot write FAILED 0x%lx", (long)slot_va);
+            }
+        } else {
+            log_line("[NetFailurePatch] disk island not found in padding [0x%lx,0x%lx) - __TEXT fallback",
+                     (long)pad_start, (long)pad_end);
+        }
+    }
+
+    // --- 4. __TEXT island fallback: DISABLED (AMFI fatal) ---
+    // vm_protect(VM_PROT_COPY) on __TEXT produces a COW page not covered by the
+    // binary's code signature. AMFI kills the process (EXC_BAD_ACCESS SIGKILL,
+    // Namespace CODESIGNING, Code 2 "Invalid Page") the first time the CPU fetches
+    // an instruction from that page. This is true even with get-task-allow present.
+    // The only valid hook path is the disk island installed by patch_binary.py.
+    // deploy.sh now calls patch_binary.py --apply automatically before each deploy.
+    if (!trampoline_armed) {
+        log_line("[NetFailurePatch] FATAL: disk island not found. "
+                 "Run: sudo bash tools/deploy.sh && bash tools/resign.sh");
     }
 
     // --- 6. Vtable scan: covers virtual-dispatch paths regardless of BL result ---

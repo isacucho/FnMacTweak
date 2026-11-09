@@ -96,5 +96,65 @@ v2.0.34 (Z bump: fix en network failure path).
 - [x] v2.0.35: BL-caller patching como fallback; trampoline page via vm_allocate(VM_FLAGS_FIXED)
       cerca de base-0x2000000; patch_text_bl con vm_protect(R+W)->BL->clear_cache->vm_protect(R+X)
 - [x] v2.0.35 compilada limpia (ARM64 dylib, simbolos verificados)
-- [ ] Verificar en sesion de juego: log "[NetFailurePatch] BL patched 0x... -> tramp 0x..." (x8) al inicio,
-      "[NetFailurePatch] ConnectionLost suppressed" a los ~42s
+- [x] v2.1.0: NO interponer mmap via DYLD_INTERPOSE. El iOS SDK declara syscall() como
+      retornando int (32 bits); mmap devuelve un puntero 64 bits. Interponerlo via syscall
+      trunca la direccion de retorno -> crash en __malloc_init durante DYLD init (antes de
+      que corra ningun codigo del juego). Verificado en crash report v2.1.0 (EXC_BAD_ACCESS
+      KERN_INVALID_ADDRESS 0x14778000, stack: libSystem_initializer->__malloc_init).
+      Solucion: solo interponer read/pread/close (todos retornan int o ssize_t, seguros).
+- [x] v2.1.10: trigger_silent_lobby_return() CRASH: EXC_BAD_ACCESS en g_orig_kicked(stale_self, 0).
+      El self guardado a t=0 tiene miembros internos destruidos a t=3s (objeto parcialmente
+      desconstructed). reason=0 indexa tabla de func ptr nula -> ldr x0,[x0] con x0=0x0.
+      Confirmado por LLDB: frame #2 kKickedFnOffset+40, crasheado por nuestro propio codigo.
+      SOLUCION (v2.1.11): eliminar trigger_silent, dejar pasar UNO al cap (V2.1.9).
+- [x] v2.1.11: sin allow-jit en entitlements (solo get-task-allow) + BNF devirtualizada
+      -> parche en disco sigue siendo necesario para hooking BNF sin AMFI kill.
+      No hay ruta pura en memoria: BNF no tiene vtable entries, vm_protect(COPY) en __TEXT
+      crea paginas COW no firmadas -> AMFI SIGKILL.
+      MEJORA (v2.1.11): deteccion de isla dinamica via scan del padding Mach-O (ADRP+LDR+CBZ+BR).
+      Elimina kDiskIslandMagic, kPaddingIslandOff, kDataSlotOff hardcoded del dylib.
+      Tras actualizacion de Epic: solo re-ejecutar patch_binary.py, sin recompilar el dylib.
+- [x] v2.1.11 CRASH: EXC_BAD_ACCESS SIGKILL, Namespace CODESIGNING Code 2 "Invalid Page".
+      Causa: dylib V2.1.4 viejo seguia cargado (LC_LOAD_DYLIB no actualizado porque deploy.sh
+      no se ejecuto). V2.1.4 usaba vm_protect(VM_PROT_COPY) en __TEXT para escribir trampoline
+      en RVA 0x5B9D630. La pagina 0x109dac000 se convirtio en COW (SM=COW r-x/rwx). AMFI mata
+      el proceso con SIGKILL cuando GameThread intenta ejecutar desde esa pagina.
+      REGLA: vm_protect(COPY) en __TEXT es AMFI-fatal incluso con get-task-allow. Solo safe en DATA.
+      FIX (v2.1.12): eliminado el bloque __TEXT island fallback de NetFailurePatcher.cpp.
+      El unico path valido es la isla de disco (patch_binary.py --apply via deploy.sh).
+      deploy.sh ya aplica patch_binary.py automaticamente en el paso [0/5].
+- [x] v2.1.12 CRASH SILENCIOSO: juego crashea a los ~30s sin IPS. Causa: island en 0x29bc
+      sobrepone los ULTIMOS 4 bytes del area de load commands (header_end = 32+sizeofcmds =
+      0x29c0). Cuando deploy.sh ejecuta install_name_tool -change para actualizar LC_LOAD_DYLIB,
+      install_name_tool reescribe el binario y restaura los bytes originales de los load commands
+      en 0x29bc-0x29bf, destruyendo el ADRP X16 de la isla (0xd05f0990 -> 0x0009c130).
+      El BL sigue apuntando a la isla, pero la isla ya no carga la direccion correcta en X16.
+      CBZ X16, +8 salta sobre el BR (X16 puede ser 0 o basura), la isla hace RET, BNF se
+      ejecuta normalmente, ConnectionLost no se suprime, juego kickea a los ~30s. Sin IPS
+      porque es un exit limpio (kick normal, no crash de CPU).
+      FIX (v2.1.13): island movida a 0x29c0 (primer byte real de padding, despues del fin
+      de load commands). ADRP identico (misma pagina 4KB). BL_PATCHES actualizados (+1 en
+      imm26 ya que target avanzo 4 bytes). Migracion automatica: patch_binary.py detecta
+      estado 'migrate' (BL sites apuntan a 0x29bc) y lo corrige en --apply.
+      REGLA: ISLAND_FILE_OFF DEBE ser >= 32 + sizeofcmds. Verificar con:
+        python3 -c "import struct; f=open(BIN,'rb'); f.seek(16); n,s=struct.unpack('<II',f.read(8)); print(hex(32+s))"
+- [x] V2.1.24: BNF hook + KickBypass funcionan. ConnectionLost suprimido indefinidamente.
+      Lobby return limpio a t=90s via ConnectionTimeout (Elapsed=90.00, Threshold=90.00).
+      BeginSpectating con self ViewTarget dispara "Attempting to spectate self!" warning
+      pero no crashea. Spectate mode no se activa. 90s freeze incomodo pero funcional.
+- [x] V2.1.25 NCL SCREEN: flood-cap 25s deja pasar ConnectionLost a t=25s. Espectador no
+      activo (BeginSpectating falla con self ViewTarget). ConnectionLost sin spectate =
+      pantalla NCL "Network Connection Lost". ConnectionTimeout en cambio hace lobby limpio.
+      REGLA: NO dejar pasar ConnectionLost si BeginSpectating no ha tenido exito. El flood-cap
+      es incorrecto mientras el ViewTarget de BeginSpectating sea self (PlayerController).
+- [x] V2.1.26: supresion indefinida restaurada. BNF type= nunca aparecio en log porque
+      ConnectionTimeout bypasa nuestro hook (distinto BL site en UNetConnection::Tick).
+      kConnectionTimeout=4 confirmado por inspeccion directa del bloque ENetworkFailure
+      strings en el binario (orden: 3=ConnectionLost 4=ConnectionTimeout).
+- [ ] V2.1.27: synthetic ConnectionTimeout via dispatch_after(25s, main_queue). Pendiente
+      test en partida. Si el lobby return ocurre a 25s en lugar de 90s: EXITO.
+- [ ] V2.2.0: vtable patch de RejoinViaSessionInternal (file_off 0x805be18, vtable
+      entry file_off 0xd4a4e70 __DATA_CONST,__const). rejoin_bypass_stub fuerza
+      [self+0x2a]=1 (bCanRejoinSession) antes del guard check a fn+0x2c.
+      Pendiente: verificar si el engine llama a RejoinViaSessionInternal tras
+      ConnectionTimeout sintetico. Si no, se necesita un trigger explicito.

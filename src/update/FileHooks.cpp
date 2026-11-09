@@ -102,14 +102,26 @@ void trace_posix(const char* op, const char* path, int rc, int saved, const char
     log_line("%s rc=%d errno=%d (%s) %s path=%s", op, rc, rc < 0 ? saved : 0, rc < 0 ? strerror(saved) : "ok", extra, path);
 }
 
+// fd tracking: when fndiag_open sees a .utoc opened O_RDONLY, it registers the fd
+// so the read/pread/mmap hooks know to patch the returned bytes in-memory.
+static constexpr int kMaxTrackedFd = 4096;
+static volatile bool g_utoc_fd[kMaxTrackedFd]; // zero-initialized (BSS)
+
+static inline void  utoc_fd_set(int fd)  { if (fd >= 0 && fd < kMaxTrackedFd) g_utoc_fd[fd] = true; }
+static inline void  utoc_fd_clear(int fd){ if (fd >= 0 && fd < kMaxTrackedFd) g_utoc_fd[fd] = false; }
+static inline bool  utoc_fd_is(int fd)   { return fd >= 0 && fd < kMaxTrackedFd && g_utoc_fd[fd]; }
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-inline int raw_stat(const char* p, struct stat* st)                            { return (int)syscall(SYS_stat64, p, st); }
-inline int raw_lstat(const char* p, struct stat* st)                           { return (int)syscall(SYS_lstat64, p, st); }
-inline int raw_access(const char* p, int mode)                                 { return (int)syscall(SYS_access, p, mode); }
-inline int raw_open(const char* p, int flags, int mode)                        { return (int)syscall(SYS_open, p, flags, mode); }
-inline int raw_unlink(const char* p)                                           { return (int)syscall(SYS_unlink, p); }
-inline int raw_rename(const char* a, const char* b)                            { return (int)syscall(SYS_rename, a, b); }
+inline int     raw_stat(const char* p, struct stat* st)                        { return (int)syscall(SYS_stat64, p, st); }
+inline int     raw_lstat(const char* p, struct stat* st)                       { return (int)syscall(SYS_lstat64, p, st); }
+inline int     raw_access(const char* p, int mode)                             { return (int)syscall(SYS_access, p, mode); }
+inline int     raw_open(const char* p, int flags, int mode)                    { return (int)syscall(SYS_open, p, flags, mode); }
+inline int     raw_close(int fd)                                               { return (int)syscall(SYS_close, fd); }
+inline ssize_t raw_read(int fd, void* buf, size_t n)                           { return (ssize_t)syscall(SYS_read, fd, buf, n); }
+inline ssize_t raw_pread(int fd, void* buf, size_t n, off_t off)              { return (ssize_t)syscall(SYS_pread, fd, buf, n, off); }
+inline int     raw_unlink(const char* p)                                       { return (int)syscall(SYS_unlink, p); }
+inline int     raw_rename(const char* a, const char* b)                        { return (int)syscall(SYS_rename, a, b); }
 #pragma clang diagnostic pop
 
 } // namespace
@@ -137,11 +149,10 @@ int fndiag_access(const char* p, int mode) {
 int fndiag_open(const char* p, int flags, ...) {
     int mode = 0;
     if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = va_arg(ap, int); va_end(ap); }
-    // Patch any .utoc file on first read to remove bad package ID references.
-    // patch_utoc_at_path uses raw syscalls internally so this cannot recurse.
-    if (p && strstr(p, ".utoc") && (flags & O_ACCMODE) == O_RDONLY)
-        patch_utoc_at_path(p);
     int rc = raw_open(p, flags, mode), saved = errno;
+    // Track .utoc fds opened for reading; patching happens in-memory in fndiag_read/pread.
+    if (rc >= 0 && p && strstr(p, ".utoc") && (flags & O_ACCMODE) == O_RDONLY)
+        utoc_fd_set(rc);
     trace_posix("open", p, rc, saved);
     errno = saved; return rc;
 }
@@ -157,10 +168,28 @@ int fndiag_rename(const char* from, const char* to) {
     int rc = raw_rename(from, to), saved = errno;
     if (watched(to))   trace_posix("rename(dst)", to, rc, saved, from ? from : "(null)");
     else               trace_posix("rename", from, rc, saved, to ? to : "(null)");
-    // Patch any .utoc the moment the download system atomically moves it into place.
-    if (rc == 0 && to && strstr(to, ".utoc"))
-        patch_utoc_at_path(to);
+    // No disk patch here; the game will open the renamed .utoc for reading and
+    // fndiag_open will register the fd so read/pread hooks patch in-memory.
     errno = saved; return rc;
+}
+
+int fndiag_close(int fd) {
+    utoc_fd_clear(fd);
+    return raw_close(fd);
+}
+
+ssize_t fndiag_read(int fd, void* buf, size_t nbytes) {
+    ssize_t nr = raw_read(fd, buf, nbytes);
+    if (nr > 0 && utoc_fd_is(fd))
+        patch_utoc_mapping(buf, (size_t)nr, "read");
+    return nr;
+}
+
+ssize_t fndiag_pread(int fd, void* buf, size_t nbytes, off_t offset) {
+    ssize_t nr = raw_pread(fd, buf, nbytes, offset);
+    if (nr > 0 && utoc_fd_is(fd))
+        patch_utoc_mapping(buf, (size_t)nr, "pread");
+    return nr;
 }
 
 // _availability_version_check is an iOS libc function absent from macOS libSystem.
@@ -178,6 +207,9 @@ __attribute__((used, section("__DATA,__interpose"))) static const Interpose g_in
     FNDIAG_INTERPOSE(fndiag_lstat,  lstat),
     FNDIAG_INTERPOSE(fndiag_access, access),
     FNDIAG_INTERPOSE(fndiag_open,   open),
+    FNDIAG_INTERPOSE(fndiag_close,  close),
+    FNDIAG_INTERPOSE(fndiag_read,   read),
+    FNDIAG_INTERPOSE(fndiag_pread,  pread),
     FNDIAG_INTERPOSE(fndiag_unlink, unlink),
     FNDIAG_INTERPOSE(fndiag_rename, rename),
 };

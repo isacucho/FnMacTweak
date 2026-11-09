@@ -187,14 +187,12 @@ static void purge_stale_encrypted_bundles(const std::string& container_root) {
     closedir(d);
 }
 
-static int patch_utoc(const char* path) {
-    // Try read-only first to diagnose contents even if write fails
+// Scan a UTOC file (read-only) and log how many occurrences of the missing
+// package ID are present. Patching now happens in-memory via the read/pread/mmap
+// interpose hooks in FileHooks.cpp; no write-back to disk.
+static int scan_utoc(const char* path) {
     int rfd = sys_open(path, O_RDONLY, 0);
-    if (rfd < 0) {
-        log_line("[TerrainPatcher] open RDONLY failed errno=%d (%s): %s",
-                 errno, strerror(errno), path);
-        return -1;
-    }
+    if (rfd < 0) return -1;
 
     struct stat st{};
     fstat(rfd, &st);
@@ -206,49 +204,21 @@ static int patch_utoc(const char* path) {
     ssize_t nr = read(rfd, buf.data(), static_cast<size_t>(sz));
     close(rfd);
 
-    if (nr != sz) {
-        log_line("[TerrainPatcher] read failed (%zd/%lld): %s", nr, (long long)sz, path);
-        return -1;
-    }
+    if (nr != sz) return -1;
 
-    // Count occurrences before attempting any write
-    int patches = 0;
+    int found = 0;
     for (size_t i = 0; i + 8 <= buf.size(); ++i) {
-        if (memcmp(buf.data() + i, k_missing, 8) == 0) {
-            memcpy(buf.data() + i, k_invalid, 8);
-            ++patches;
-            i += 7;
-        }
+        if (memcmp(buf.data() + i, k_missing, 8) == 0) { ++found; i += 7; }
     }
 
-    log_line("[TerrainPatcher] scan %s sz=%lld found=%d", path, (long long)sz, patches);
-
-    if (patches == 0) return 0;
-
-    // Write patched buffer back
-    int wfd = sys_open(path, O_WRONLY, 0);
-    if (wfd < 0) {
-        log_line("[TerrainPatcher] open WRONLY failed errno=%d (%s): %s",
-                 errno, strerror(errno), path);
-        // Write to a temp file as fallback (game will not pick it up, but useful for
-        // confirming the bytes ARE there if the write path is truly blocked)
-        return -1;
-    }
-
-    ssize_t nw = write(wfd, buf.data(), static_cast<size_t>(sz));
-    close(wfd);
-
-    if (nw != sz) {
-        log_line("[TerrainPatcher] partial write (%zd/%lld): %s", nw, (long long)sz, path);
-        return -1;
-    }
-
-    log_line("[TerrainPatcher] patched %d occurrence(s) in %s", patches, path);
-    return patches;
+    if (found)
+        log_line("[TerrainPatcher] scan %s sz=%lld found=%d (will patch in-memory via hook)",
+                 path, (long long)sz, found);
+    return found;
 }
 
-// Scan a directory for *.utoc files and patch each one.
-static int patch_utoc_dir(const std::string& paks_dir) {
+// Scan a directory for *.utoc files and log occurrences (no disk writes).
+static int scan_utoc_dir(const std::string& paks_dir) {
     DIR* d = opendir(paks_dir.c_str());
     if (!d) return 0;
 
@@ -261,7 +231,7 @@ static int patch_utoc_dir(const std::string& paks_dir) {
         if (nlen < 5 || strcmp(name + nlen - 5, ".utoc") != 0) continue;
 
         std::string utoc = paks_dir + "/" + name;
-        int n = patch_utoc(utoc.c_str());
+        int n = scan_utoc(utoc.c_str());
         if (n > 0) total += n;
     }
     closedir(d);
@@ -269,10 +239,6 @@ static int patch_utoc_dir(const std::string& paks_dir) {
 }
 
 } // namespace
-
-int patch_utoc_at_path(const char* path) {
-    return patch_utoc(path);
-}
 
 int patch_utoc_mapping(void* ptr, size_t len, const char* path) {
     if (!ptr || len < 8) return 0;
@@ -292,16 +258,17 @@ int patch_utoc_mapping(void* ptr, size_t len, const char* path) {
 }
 
 void install_terrain_patch(const std::string& container_root) {
-    // Purge stale Encrypted bundles before anything else so the game re-downloads clean.
+    // Purge stale Encrypted bundles so the game re-downloads clean.
     purge_stale_encrypted_bundles(container_root);
 
+    // Pre-scan only: log which UTOCs carry the missing package ID.
+    // The actual byte patching happens in-memory via the read/pread/mmap interpose
+    // hooks installed in FileHooks.cpp; no write-back to disk.
     std::string base = container_root
         + "/Documents/FortniteGame/PersistentDownloadDir";
 
-    // 1. GameCustom/InstalledBundles — legacy terrain bundles (*/plugin.utoc)
     {
         std::string bundles = base + "/GameCustom/InstalledBundles";
-        log_line("[TerrainPatcher] scanning GameCustom: %s", bundles.c_str());
         DIR* d = opendir(bundles.c_str());
         if (d) {
             int total = 0;
@@ -311,21 +278,16 @@ void install_terrain_patch(const std::string& container_root) {
                 std::string utoc = bundles + "/" + ent->d_name + "/plugin.utoc";
                 struct stat st{};
                 if (stat(utoc.c_str(), &st) != 0) continue;
-                int n = patch_utoc(utoc.c_str());
+                int n = scan_utoc(utoc.c_str());
                 if (n > 0) total += n;
             }
             closedir(d);
-            log_line("[TerrainPatcher] GameCustom done patches=%d", total);
-        } else {
-            log_line("[TerrainPatcher] GameCustom opendir failed errno=%d", errno);
+            if (total) log_line("[TerrainPatcher] GameCustom: %d occurrence(s) will be patched in-memory", total);
         }
     }
 
-    // 2. InstalledBundles/Encrypted* — pakchunk1009-1012/1035/1037
-    //    Layout: Encrypted<n>/fortnitegame/content/paks/*.utoc
     {
         std::string bundles = base + "/InstalledBundles";
-        log_line("[TerrainPatcher] scanning Encrypted: %s", bundles.c_str());
         DIR* d = opendir(bundles.c_str());
         if (d) {
             int total = 0;
@@ -335,14 +297,14 @@ void install_terrain_patch(const std::string& container_root) {
                 if (strncmp(ent->d_name, "Encrypted", 9) != 0) continue;
                 std::string paks = bundles + "/" + ent->d_name
                                    + "/fortnitegame/content/paks";
-                total += patch_utoc_dir(paks);
+                total += scan_utoc_dir(paks);
             }
             closedir(d);
-            log_line("[TerrainPatcher] Encrypted done patches=%d", total);
-        } else {
-            log_line("[TerrainPatcher] Encrypted opendir failed errno=%d", errno);
+            if (total) log_line("[TerrainPatcher] Encrypted: %d occurrence(s) will be patched in-memory", total);
         }
     }
+
+    log_line("[TerrainPatcher] installed (in-memory mode): hooks in FileHooks will patch on read/pread/mmap");
 }
 
 } // namespace fndiag

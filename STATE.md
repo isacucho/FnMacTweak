@@ -2,87 +2,54 @@
 
 ## Estado actual
 
-**CAUSA RAIZ REAL IDENTIFICADA. v2.0.33 deployada pero kick persiste. v2.0.34 requerida.**
+**V2.2.0 compilada, pendiente deploy+resign manual (requiere sudo en terminal).**
 
-## Timeline del kick - Sesion 1 (v2.0.32, 2026-11-08)
+### Mecanismo confirmado (V2.1.24 FnDiag.log + V2.1.25 NCL session)
 
-| Timestamp | Linea | Evento |
+Tras un kick reason=144:
+
+1. `[KickBypass] ClientWasKicked reason=144` -> suprimido, BeginSpectating llamado con self
+2. Servidor sigue enviando ConnectionLost cada ~8ms indefinidamente
+3. Nuestro hook suprime todos los ConnectionLost (flooding indefinido)
+4. BeginSpectating con `self` como ViewTarget dispara `Warning: BeginSpectating: Attempting to spectate self!` (UE rechaza PlayerController como ViewTarget de si mismo); spectate mode NO se activa
+5. A t=90s: `UNetConnection::Tick: Connection TIMED OUT. Elapsed: 90.00, Threshold: 90.00` -> ConnectionTimeout -> BroadcastNetworkFailure type=? (integer desconocido, NOT suprimido por nuestro hook) -> `Location=ReturningToFrontEnd` -> lobby limpio sin NCL
+
+**FREEZE = 90s entre kick y ConnectionTimeout.** No hay NCL screen.
+
+## Historia de versiones relevante
+
+| Version | Comportamiento | Resultado |
 |---|---|---|
-| 17:34:19 | 3-57 | Init OK: 18/18 KickBypass, NmtPatch, todos los hooks |
-| 17:34:24 | 11239 | HTTP 429 en `linkIdentity` (rate limit startup, no fatal) |
-| 17:34:32 | 16808 | HTTP 400 en `experience_br?platform=ios&major=43` |
-| 17:34:50 | 17225 | `CustomKeyMatchCommand_PlayerKick` REGISTRADO (entrada partida) |
-| 17:35:30 | 9114 | **ConnectionLost (game time 16.35.30:588)** -> match exit |
-| 17:35:30 | 17850+ | LogFortPerformance end-of-zone report (analiticas post-exit) |
-| 17:35:33 | 17919 | `CustomKeyMatchCommand_PlayerKick` DESREGISTRADO |
+| V2.1.23 | BeginSpectating con nullptr ViewTarget | Crash en spectate tick a t=17-18s |
+| V2.1.24 | BeginSpectating con self ViewTarget | 90s freeze, lobby limpio (no NCL). A veces 22s (inconsistente) |
+| V2.1.25 | Igual + flood-cap 25s | NCL screen a t=25s (BeginSpectating falla, ConnectionLost pasa sin spectate activo) |
+| V2.1.26 | Revert flood-cap, supr. indefinida + log BNF types | 90s freeze, lobby limpio. BNF type= nunca aparecio (ConnectionTimeout bypasa nuestro BL site) |
+| V2.1.27 | Synthetic ConnectionTimeout via dispatch_after(25s) | Pendiente test en partida |
+| V2.2.0 | vtable patch RejoinViaSessionInternal, bCanRejoinSession bypass | Pendiente test |
 
-## Timeline del kick - Sesion 2 (v2.0.33, 2026-11-08)
+## V2.1.27 - que cambia
 
-| Timestamp OSLog | Linea | Evento |
-|---|---|---|
-| 18:05:48 | 9114 | Replay sesion anterior (buffered game log) |
-| 18:06:03 | 20960 | **[ContentPatch] experience_br intercepted -> synthetic 200** (HTTP fix OK) |
-| 18:06:17 | 21371 | `CustomKeyMatchCommand_PlayerKick` REGISTRADO (game time 17.06.17) |
-| 18:06:59.562 | 21867 | **[KickBypass] ClientWasKicked reason=1805386128 -> SUPPRESSED** |
-| 18:07:00.020 | 22009 | **ConnectionLost (game time 17.06.59:655, 93ms tras el RPC)** -> match exit |
-| 18:07:00 | 22165+ | LogFortPerformance end-of-zone report (analiticas post-exit) |
-| 18:07:00 | 22237 | `CustomKeyMatchCommand_PlayerKick` DESREGISTRADO |
+- kConnectionTimeout = 4 (confirmado: ENetworkFailure strings block en binario, orden: 3=ConnectionLost 4=ConnectionTimeout)
+- ConnectionTimeout no pasa por nuestro hook (distinto BL site en UNetConnection::Tick, no parchado por patch_binary.py)
+- Mecanismo: en la primera supresion de ConnectionLost post-kick, guardar params (self/world/driver) y dispatch_after(25s, main_queue) que llama g_orig_bnf con kConnectionTimeout
+- Resultado esperado: lobby return limpio a t=25s en lugar de t=90s
+- Flood de ConnectionLost sigue suprimido despues del synthetic (g_last_kick_suppressed_ns no se borra)
+- Real ConnectionTimeout a t=90s deberia no dispararse (UNetConnection destruida a t=25s por el lobby return)
 
-Match entry: 17.06.17. ConnectionLost: 17.06.59. Duracion: **42 segundos** (identico ambas sesiones).
+## Deploy V2.1.26
 
-## Causa raiz
-
-**Mecanismo double-barrel del servidor:**
-
-1. Servidor envia `ClientWasKicked RPC, reason=1805386128` a ~42s de match entry
-2. KickBypass suprime el RPC (correcto, funciona)
-3. Servidor detecta que el cliente no se desconecto -> cierra la conexion UDP 93ms despues
-4. `BroadcastNetworkFailure: ConnectionLost` en GameNetDriver -> match exit
-5. LogFortPerformance end-of-zone analiticas se disparan como parte del exit (incluye NumLoadCustomizationFailed, que siempre aparece al salir, no es causa)
-
-**El reason code 1805386128 (0x6B9C0190)** no esta en el rango documentado (0-5).
-Probablemente un kick de plataforma/EAC con reason code extendido.
-
-## Hipotesis descartadas
-
-- **NumLoadCustomizationFailed como causa**: DESCARTADA. Es telemetria de fin de partida.
-- **HTTP 400 en experience_br como causa directa del kick**: DESCARTADA. ContentPatch
-  corrige el 400 a 200 (confirmado en v2.0.33 linea 20960/20962) pero el kick persiste.
-- **EAC heartbeat puro sin ClientWasKicked**: DESCARTADA. KickBypass intercepta un RPC real.
-
-## Patches existentes
-
-### v2.0.33 (deployada, funciona parcialmente)
-
-- ContentPatch: `FnContentLinkProtocol : NSURLProtocol` intercepta `experience_br` -> HTTP 200
-- Confirma: HTTP 400 era un problema real (cosmetics), pero no la causa del kick
-- KickBypass 18/18 entries funcionando: suprime el RPC correctamente
-- **El kick persiste porque el servidor usa ConnectionLost como fallback al RPC suprimido**
-
-## Estado actual: v2.0.35 compilada, pendiente deploy y test
-
-NetFailurePatcher doble path:
-1. Vtable scan (__DATA_CONST/__AUTH_CONST): si encuentra punteros a bnf_va, los reemplaza.
-   En este build encuentra 0 (funcion devirtualizada).
-2. Fallback BL-caller patching: 8 callers directos parchados en __TEXT via trampoline page
-   (vm_allocate VM_FLAGS_FIXED cerca de base-0x2000000, dentro de ±128MB de todos los callers).
-   BL->trampoline->bnf_bypass_stub. Cada caller validado antes de parcharlo (opcode + target).
-
-g_last_kick_suppressed_ns es el canal entre KickPatcher y NetFailurePatcher (500ms window).
-
-Deploy y verificar con:
 ```bash
-bash tools/resign.sh && bash tools/deploy.sh
-log stream --predicate 'subsystem == "com.alexgrdev.fnmackickfix"' --level debug
+bash tools/deploy.sh && bash tools/resign.sh
 ```
 
-Lineas de log a buscar al inicio:
-- `[NetFailurePatch] trampoline page at 0x...` (trampoline asignado)
-- `[NetFailurePatch] BL patched 0x... -> tramp 0x...` (8 veces)
-- `[NetFailurePatch] done: ... bl_patched=8/8`
+(deploy.sh tiene sudo interno para codesign --remove-signature)
+(resign.sh NO llevar sudo externo: usa el keychain del usuario para Apple Development cert)
 
-Linea a buscar a los ~42s de match entry:
-- `[NetFailurePatch] ConnectionLost suppressed (delta=XXms after suppressed kick)`
+## Offsets v2.0.32 (slide 0x46c000, base 0x10046c000)
 
-Callers RVA (IMAGE_BASE=0x100000000):
-  0xf21998, 0xf89044, 0x113b89c, 0x117504c, 0x16356dc, 0x54c43c4, 0x54c7db4, 0x5b9fb70
+| Simbolo | Offset desde base | Notas |
+|---|---|---|
+| KickBypass vtable | kKickedFnOffset = 0x858cf18 | 18 entradas parchadas |
+| BNF disk island | kBnfOffset = 0x5642c74 | kBnfPrologue = 0xd10203ff |
+| BeginSpectating island | kSpectateIslandOff = 0xb945b84 | magic 0xb00395b0 |
+| BeginSpectating slot | kSpectateSlotOff = 0x12bfa888 | __bss slot |

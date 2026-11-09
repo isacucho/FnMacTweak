@@ -9,7 +9,22 @@ APP="/Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app"
 FW_DIR="$APP/Frameworks"
 BIN="$APP/FortniteClient-IOS-Shipping"
 DYLIB_DST="$FW_DIR/FnMacKickFix-V${VERSION}-dev.dylib"
-LOG="$HOME/Library/Containers/D2C36FB2-592A-48AC-984E-A6CC17CB07C9/Documents/FnDiag.log"
+# UUID del container asignado por Sideloadly, puede cambiar al reinstalar.
+# Buscar dinamicamente: primero por FnDiag.log existente, luego por lsof si el
+# juego esta corriendo, con fallback al UUID conocido.
+_discover_container_log() {
+    local f
+    f=$(find ~/Library/Containers -name "FnDiag.log" 2>/dev/null | head -1)
+    [ -n "$f" ] && echo "$f" && return
+    local pid
+    pid=$(pgrep -f FortniteClient-IOS 2>/dev/null | head -1)
+    if [ -n "$pid" ]; then
+        f=$(lsof -p "$pid" 2>/dev/null | awk '$NF~/FnDiag\.log/{print $NF}' | head -1)
+        [ -n "$f" ] && echo "$f" && return
+    fi
+    echo "$HOME/Library/Containers/0F16E856-1C80-4448-9C65-ED3A8E8DA5E9/Data/Documents/FnDiag.log"
+}
+LOG=$(_discover_container_log)
 
 # Resolve path
 DYLIB_SRC="$(cd "$(dirname "$DYLIB_SRC")" && pwd)/$(basename "$DYLIB_SRC")"
@@ -23,10 +38,53 @@ fi
 echo "=== FnMac Deploy V${VERSION} ==="
 echo "Fuente: $DYLIB_SRC ($(du -h "$DYLIB_SRC" | cut -f1))"
 
-# Remove provenance xattr so we can overwrite
-echo "Quitando com.apple.provenance..."
-xattr -d com.apple.provenance "$DYLIB_DST" 2>/dev/null || true
-xattr -d com.apple.provenance "$FW_DIR" 2>/dev/null || true
+# Kill any running Fortnite process: the kernel blocks writes to a mapped executable.
+# write-xor-execute is enforced at the VFS level regardless of file permissions.
+FN_PID=$(pgrep -f FortniteClient-IOS 2>/dev/null | head -1 || true)
+if [ -n "$FN_PID" ]; then
+    echo "Matando FortniteClient-IOS (PID $FN_PID)..."
+    kill "$FN_PID" 2>/dev/null || true
+    sleep 1
+fi
+
+# Remove code signature first: com.apple.macl on the .app dir blocks ALL writes
+# (even by the file owner) once the app has been run. sudo codesign --remove-signature
+# disables the kernel's macl write-protection; xattr data remains but is no longer
+# enforced. This MUST run before any cp/write/patch_binary step.
+echo "Quitando firma para liberar macl write-protection..."
+sudo codesign --remove-signature "$APP" 2>&1 || true
+sudo xattr -cr "$APP" 2>/dev/null || true
+xattr -cr "$APP" 2>/dev/null || true
+
+# --- 0. Disk island patch (required for BNF hook) ---
+# BroadcastNetworkFailure is non-virtual: the only way to hook it without
+# AMFI kill is via a pre-patched island in Mach-O padding. Auto-apply here.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PATCH_PY="$SCRIPT_DIR/patch_binary.py"
+echo ""
+echo "[0/5] Verificando parche de isla en disco..."
+PATCH_STATE=$(python3 "$PATCH_PY" --verify 2>&1 | grep "^Island at" | awk '{print $NF}')
+echo "  Estado: $PATCH_STATE"
+if [ "$PATCH_STATE" = "unpatched" ]; then
+    echo "  Aplicando parche de isla (patch_binary.py --apply)..."
+    python3 "$PATCH_PY" --apply
+    echo "  Isla aplicada."
+elif [ "$PATCH_STATE" = "patched" ]; then
+    echo "  BNF island presente. Verificando islands adicionales..."
+    python3 "$PATCH_PY" --apply || true
+elif [ "$PATCH_STATE" = "patched_old" ]; then
+    echo "  Isla antigua detectada, actualizando..."
+    python3 "$PATCH_PY" --apply
+    echo "  Isla actualizada."
+elif [ "$PATCH_STATE" = "migrate" ]; then
+    echo "  Migrando isla de 0x29bc -> 0x29c0 (fix install_name_tool overlap)..."
+    python3 "$PATCH_PY" --apply
+    echo "  Migracion completada."
+else
+    echo "  Estado inesperado ($PATCH_STATE), intentando aplicar parche..."
+    python3 "$PATCH_PY" --apply && echo "  Parche aplicado." || echo "  AVISO: patch_binary.py --apply fallo, continua sin parche."
+fi
+
 
 # Copy to versioned destination
 echo "Copiando dylib..."
@@ -60,7 +118,25 @@ elif [ "$OLD_LC" = "$NEW_LC" ]; then
 else
     OLD_FNAME=$(basename "$OLD_LC")
     echo "  $OLD_FNAME -> $NEW_FNAME"
-    install_name_tool -change "$OLD_LC" "$NEW_LC" "$BIN"
+    # install_name_tool fails when LC_CODE_SIGNATURE is present (LINKEDIT inconsistency).
+    # Direct byte-replace works regardless of signature state; both strings must be same length.
+    python3 - "$BIN" "$OLD_LC" "$NEW_LC" <<'PYEOF'
+import sys, struct
+BIN, OLD, NEW = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
+if len(OLD) != len(NEW):
+    sys.exit(f"ERROR: len mismatch OLD={len(OLD)} NEW={len(NEW)} - cannot patch in-place")
+with open(BIN, 'rb') as f:
+    data = bytearray(f.read())
+idx = data.find(OLD)
+if idx == -1:
+    idx2 = data.find(NEW)
+    print(f"Already {sys.argv[3]} at 0x{idx2:x}" if idx2 != -1 else "ERROR: LC_LOAD_DYLIB string not found")
+    sys.exit(0)
+data[idx:idx+len(OLD)] = NEW
+with open(BIN, 'wb') as f:
+    f.write(data)
+print(f"LC_LOAD_DYLIB patched at 0x{idx:x}: {sys.argv[2]} -> {sys.argv[3]}")
+PYEOF
     echo "LC_LOAD_DYLIB actualizado"
 
     # Remove the old versioned dylib from Frameworks
@@ -90,5 +166,6 @@ fi
 
 echo ""
 echo "=== Deploy completo. Ejecuta resign.sh antes de lanzar Fortnite. ==="
+echo "(Incluye parche de isla en disco. BNF hook activo tras resign + relaunch.)"
 echo "Para monitorizar el log en tiempo real:"
 echo "  tail -f '$LOG'"
