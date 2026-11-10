@@ -5,6 +5,7 @@
 #include <mach/vm_map.h>
 #include <mach/vm_region.h>
 #include <mach-o/dyld.h>
+#include <dispatch/dispatch.h>
 #include <cstdint>
 #include <atomic>
 #include <time.h>
@@ -136,11 +137,19 @@ static void* rejoin_scan_thread(void*) {
     *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<uintptr_t>(obj) + 0x2a) = 1;
     __asm__ volatile("dmb ish" ::: "memory");
 
-    // Mark before calling so NetFailurePatcher synthetic CT is cancelled.
+    // Mark before dispatching so NetFailurePatcher synthetic CT sees it at t=25s.
     g_rejoin_attempted.store(true, std::memory_order_release);
-    log_line("[Reconnect] scan done (%llums) obj=%p bCanRejoinSession forced -> calling RejoinViaSessionInternal",
+    log_line("[Reconnect] scan done (%llums) obj=%p bCanRejoinSession forced -> dispatching to main thread",
              (unsigned long long)dt_ms, obj);
-    g_orig_rejoin(obj);
+
+    // RejoinViaSessionInternal must run on the game thread (= main thread on iOS).
+    // Calling from a background pthread causes a silent crash (UE5 GameThread assertions).
+    uintptr_t obj_va = reinterpret_cast<uintptr_t>(obj);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        log_line("[Reconnect] RejoinViaSessionInternal firing on main thread obj=%p",
+                 reinterpret_cast<void*>(obj_va));
+        if (g_orig_rejoin) g_orig_rejoin(reinterpret_cast<void*>(obj_va));
+    });
 
     g_scan_running.store(false, std::memory_order_release);
     return nullptr;
