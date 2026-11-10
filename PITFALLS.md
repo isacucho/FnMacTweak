@@ -4,6 +4,22 @@ Regla estricta: un error a la vez. No avanzar al siguiente hasta resolver y veri
 
 ---
 
+## ACTIVO: V2.5.0 heap scan crashea el proceso (SIGBUS en pthread)
+
+**Sintoma:** kick reason=144 suprimido, "spawning heap scan" en log, juego muere
+sin crash report.
+
+**Causa:** dereference directo de cada puntero en regiones RW anonimas. Entre
+`vm_region_recurse_64` y el acceso, el allocator puede devolver paginas al kernel:
+SIGBUS en el pthread, proceso muerto sin crash log.
+
+**Fix (V2.5.1):** `vm_read_overwrite` copia en buffer local via Mach IPC. Si la
+region ya no existe, devuelve error y se salta; sin señal fatal.
+
+**Estado:** fix compilado, pendiente deploy y verificacion en partida.
+
+---
+
 ## Error #1 [ABIERTO]: Kick via ConnectionLost tras ClientWasKicked suprimido
 
 ### Sintoma

@@ -69,12 +69,17 @@ static uintptr_t g_rejoin_vtable_va = 0;
 static std::atomic<bool> g_scan_running{false};
 
 // Iterate all anonymous RW leaf regions and search for a 64-bit value.
-// Returns the aligned address of the first match, or nullptr.
+// Uses vm_read_overwrite to copy into a local buffer - avoids SIGBUS/SIGSEGV
+// if a region is unmapped between vm_region_recurse_64 and our read.
+// Returns the heap address of the first match, or nullptr.
 static void* scan_heap_for_vtable(uintptr_t vtable_va) {
+    static const vm_size_t kChunk = 0x100000; // 1 MB per read call
+    static uint8_t s_buf[kChunk];              // BSS; scan is serialized via g_scan_running
+
     vm_address_t addr = 0;
     vm_size_t    size = 0;
     while (addr < 0x700000000000ULL) {
-        natural_t depth = 100; // auto-recurse into submaps
+        natural_t depth = 100;
         vm_region_submap_info_data_64_t info;
         mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
         kern_return_t kr = vm_region_recurse_64(
@@ -84,12 +89,24 @@ static void* scan_heap_for_vtable(uintptr_t vtable_va) {
 
         bool is_rw = (info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE);
         if (!info.is_submap && is_rw && !info.external_pager && size >= 8) {
-            const uint8_t* p   = reinterpret_cast<const uint8_t*>(addr);
-            const uint8_t* end = p + size - 7;
-            while (p < end) {
-                if (*reinterpret_cast<const uintptr_t*>(p) == vtable_va)
-                    return const_cast<void*>(reinterpret_cast<const void*>(p));
-                p += 8;
+            vm_size_t off = 0;
+            while (off < size) {
+                vm_size_t chunk = (size - off < kChunk) ? (size - off) : kChunk;
+                vm_size_t nread = chunk;
+                kr = vm_read_overwrite(mach_task_self(),
+                                       addr + off, chunk,
+                                       reinterpret_cast<vm_address_t>(s_buf), &nread);
+                if (kr == KERN_SUCCESS && nread >= 8) {
+                    const uint8_t* p   = s_buf;
+                    const uint8_t* end = s_buf + nread - 7;
+                    while (p < end) {
+                        if (*reinterpret_cast<const uintptr_t*>(p) == vtable_va) {
+                            return reinterpret_cast<void*>(addr + off + (p - s_buf));
+                        }
+                        p += 8;
+                    }
+                }
+                off += chunk;
             }
         }
         addr += size;
