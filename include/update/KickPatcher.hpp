@@ -9,6 +9,10 @@ namespace fndiag {
 // that follows within 500ms (server's UDP disconnect fallback after kick).
 extern std::atomic<uint64_t> g_last_kick_suppressed_ns;
 
+// Set by rejoin_scan_thread when it successfully calls RejoinViaSessionInternal.
+// NetFailurePatcher checks this in the synthetic CT block to cancel lobby return.
+extern std::atomic<bool> g_rejoin_attempted;
+
 void install_kick_bypass();
 
 } // namespace fndiag

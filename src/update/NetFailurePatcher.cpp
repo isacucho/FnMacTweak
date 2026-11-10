@@ -95,6 +95,11 @@ static void bnf_bypass_stub(void* self, void* world, void* net_driver,
                     dispatch_after(
                         dispatch_time(DISPATCH_TIME_NOW, (int64_t)kEarlyTimeoutNs),
                         dispatch_get_main_queue(), ^{
+                            // Cancel if rejoin_scan_thread already called RejoinViaSessionInternal.
+                            if (g_rejoin_attempted.load(std::memory_order_acquire)) {
+                                log_line("[NetFailurePatch] synthetic CT skipped (rejoin in progress)");
+                                return;
+                            }
                             void* s = (void*)g_saved_bnf_self.load(std::memory_order_relaxed);
                             void* w = (void*)g_saved_bnf_world.load(std::memory_order_relaxed);
                             void* d = (void*)g_saved_bnf_driver.load(std::memory_order_relaxed);

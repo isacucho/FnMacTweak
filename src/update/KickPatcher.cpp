@@ -3,14 +3,17 @@
 
 #include <mach/mach.h>
 #include <mach/vm_map.h>
+#include <mach/vm_region.h>
 #include <mach-o/dyld.h>
 #include <cstdint>
 #include <atomic>
 #include <time.h>
+#include <pthread.h>
 
 namespace fndiag {
 
 std::atomic<uint64_t> g_last_kick_suppressed_ns{0};
+std::atomic<bool>     g_rejoin_attempted{false};
 
 // File offset (from IMAGE_BASE=0x100000000) of ClientWasKicked_Implementation.
 // EFortKickReason in x1: 0=NotKicked 1=GenericKick 2=WasBanned
@@ -56,11 +59,75 @@ using RejoinFn    = void (*)(void* self);  // UFortRejoinCheck::RejoinViaSession
 static KickedFn    g_orig_kicked   = nullptr;
 static SpectatingFn g_orig_spectate = nullptr;
 static RejoinFn    g_orig_rejoin   = nullptr;
-// Re-entrancy guard: g_orig_kicked dispatches through the same vtable,
-// which would re-enter kick_bypass_stub and cause infinite recursion.
-// Re-entrancy guard kept for safety in case begin_spectating_stub somehow
-// re-enters kick_bypass_stub through an unexpected path.
+// Re-entrancy guard: kept for safety.
 static std::atomic<bool> g_kick_in_orig{false};
+
+// vtable VA for UFortRejoinCheck, computed in install_kick_bypass.
+// Used by rejoin_scan_thread to search the heap.
+static uintptr_t g_rejoin_vtable_va = 0;
+// Guards against launching multiple concurrent scans.
+static std::atomic<bool> g_scan_running{false};
+
+// Iterate all anonymous RW leaf regions and search for a 64-bit value.
+// Returns the aligned address of the first match, or nullptr.
+static void* scan_heap_for_vtable(uintptr_t vtable_va) {
+    vm_address_t addr = 0;
+    vm_size_t    size = 0;
+    while (addr < 0x700000000000ULL) {
+        natural_t depth = 100; // auto-recurse into submaps
+        vm_region_submap_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t kr = vm_region_recurse_64(
+            mach_task_self(), &addr, &size, &depth,
+            (vm_region_recurse_info_t)&info, &count);
+        if (kr != KERN_SUCCESS || size == 0) break;
+
+        bool is_rw = (info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE);
+        if (!info.is_submap && is_rw && !info.external_pager && size >= 8) {
+            const uint8_t* p   = reinterpret_cast<const uint8_t*>(addr);
+            const uint8_t* end = p + size - 7;
+            while (p < end) {
+                if (*reinterpret_cast<const uintptr_t*>(p) == vtable_va)
+                    return const_cast<void*>(reinterpret_cast<const void*>(p));
+                p += 8;
+            }
+        }
+        addr += size;
+    }
+    return nullptr;
+}
+
+// Pthread body: scans heap for UFortRejoinCheck*, forces bCanRejoinSession=1,
+// calls RejoinViaSessionInternal if found.
+static void* rejoin_scan_thread(void*) {
+    if (!g_rejoin_vtable_va || !g_orig_rejoin) {
+        g_scan_running.store(false, std::memory_order_release);
+        return nullptr;
+    }
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    void* obj = scan_heap_for_vtable(g_rejoin_vtable_va);
+    uint64_t dt_ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1000000ULL;
+
+    if (!obj) {
+        log_line("[Reconnect] scan done (%llums) - UFortRejoinCheck NOT FOUND (match not started?)",
+                 (unsigned long long)dt_ms);
+        g_scan_running.store(false, std::memory_order_release);
+        return nullptr;
+    }
+
+    // Force bCanRejoinSession flag before the guard check at RejoinViaSessionInternal+0x2c.
+    *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<uintptr_t>(obj) + 0x2a) = 1;
+    __asm__ volatile("dmb ish" ::: "memory");
+
+    // Mark before calling so NetFailurePatcher synthetic CT is cancelled.
+    g_rejoin_attempted.store(true, std::memory_order_release);
+    log_line("[Reconnect] scan done (%llums) obj=%p bCanRejoinSession forced -> calling RejoinViaSessionInternal",
+             (unsigned long long)dt_ms, obj);
+    g_orig_rejoin(obj);
+
+    g_scan_running.store(false, std::memory_order_release);
+    return nullptr;
+}
 
 static void rejoin_bypass_stub(void* self) {
     // bCanRejoinSession at [UFortRejoinCheck + 0x2a] is false after a server kick.
@@ -106,8 +173,19 @@ static void kick_bypass_stub(void* self, int32_t reason) {
     }
     g_last_kick_suppressed_ns.store(
         clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), std::memory_order_relaxed);
-    log_line("[KickBypass] suppressed reason=%d self=%p - forcing BeginSpectating", r, self);
-    begin_spectating_stub(self, self);  // pass self as ViewTarget: valid AActor*, avoids nullptr deref in periodic spectate tick
+    g_rejoin_attempted.store(false, std::memory_order_release);
+
+    log_line("[KickBypass] suppressed reason=%d self=%p - spawning heap scan for UFortRejoinCheck*", r, self);
+    // UFortRejoinCheck is a UGameInstanceSubsystem - not allocated in lobby, only inside a match.
+    // Scan heap here (we ARE inside a match) to find it and call RejoinViaSessionInternal directly.
+    if (g_orig_rejoin && g_rejoin_vtable_va &&
+        !g_scan_running.exchange(true, std::memory_order_acq_rel)) {
+        pthread_t t;
+        if (pthread_create(&t, nullptr, rejoin_scan_thread, nullptr) == 0)
+            pthread_detach(t);
+        else
+            g_scan_running.store(false, std::memory_order_release);
+    }
     g_kick_in_orig.store(false, std::memory_order_release);
 }
 
@@ -164,7 +242,8 @@ void install_kick_bypass() {
     uintptr_t rejoin_orig_va   = base + kRejoinFnOff;
     uintptr_t rejoin_stub_va   = reinterpret_cast<uintptr_t>(rejoin_bypass_stub);
     mach_vm_address_t rejoin_entry = static_cast<mach_vm_address_t>(base + kRejoinVtableOff);
-    g_orig_rejoin = reinterpret_cast<RejoinFn>(rejoin_orig_va);
+    g_orig_rejoin        = reinterpret_cast<RejoinFn>(rejoin_orig_va);
+    g_rejoin_vtable_va   = base + kRejoinVtableOff; // heap scan target: objects holding this VA
     if (patch_vtable_entry(rejoin_entry, rejoin_orig_va, rejoin_stub_va)) {
         log_line("[Reconnect] vtable patched: orig=0x%lx stub=0x%lx entry=0x%lx",
                  (long)rejoin_orig_va, (long)rejoin_stub_va, (long)rejoin_entry);
