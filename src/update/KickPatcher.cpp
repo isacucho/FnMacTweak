@@ -5,11 +5,9 @@
 #include <mach/vm_map.h>
 #include <mach/vm_region.h>
 #include <mach-o/dyld.h>
-#include <dispatch/dispatch.h>
 #include <cstdint>
 #include <atomic>
 #include <time.h>
-#include <pthread.h>
 
 namespace fndiag {
 
@@ -66,6 +64,9 @@ static std::atomic<bool> g_kick_in_orig{false};
 // vtable VA for UFortRejoinCheck, computed in install_kick_bypass.
 // Used by rejoin_scan_thread to search the heap.
 static uintptr_t g_rejoin_vtable_va = 0;
+// Mach-O base address (IMAGE_BASE + slide), set in install_kick_bypass.
+// Used by kick_bypass_stub to probe EOS session state before calling rejoin.
+static uintptr_t g_image_base       = 0;
 // Guards against launching multiple concurrent scans.
 static std::atomic<bool> g_scan_running{false};
 
@@ -115,46 +116,6 @@ static void* scan_heap_for_vtable(uintptr_t vtable_va) {
     return nullptr;
 }
 
-// Pthread body: scans heap for UFortRejoinCheck*, forces bCanRejoinSession=1,
-// calls RejoinViaSessionInternal if found.
-static void* rejoin_scan_thread(void*) {
-    if (!g_rejoin_vtable_va || !g_orig_rejoin) {
-        g_scan_running.store(false, std::memory_order_release);
-        return nullptr;
-    }
-    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    void* obj = scan_heap_for_vtable(g_rejoin_vtable_va);
-    uint64_t dt_ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1000000ULL;
-
-    if (!obj) {
-        log_line("[Reconnect] scan done (%llums) - UFortRejoinCheck NOT FOUND (match not started?)",
-                 (unsigned long long)dt_ms);
-        g_scan_running.store(false, std::memory_order_release);
-        return nullptr;
-    }
-
-    // Force bCanRejoinSession flag before the guard check at RejoinViaSessionInternal+0x2c.
-    *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<uintptr_t>(obj) + 0x2a) = 1;
-    __asm__ volatile("dmb ish" ::: "memory");
-
-    // Mark before dispatching so NetFailurePatcher synthetic CT sees it at t=25s.
-    g_rejoin_attempted.store(true, std::memory_order_release);
-    log_line("[Reconnect] scan done (%llums) obj=%p bCanRejoinSession forced -> dispatching to main thread",
-             (unsigned long long)dt_ms, obj);
-
-    // RejoinViaSessionInternal must run on the game thread (= main thread on iOS).
-    // Calling from a background pthread causes a silent crash (UE5 GameThread assertions).
-    uintptr_t obj_va = reinterpret_cast<uintptr_t>(obj);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        log_line("[Reconnect] RejoinViaSessionInternal firing on main thread obj=%p",
-                 reinterpret_cast<void*>(obj_va));
-        if (g_orig_rejoin) g_orig_rejoin(reinterpret_cast<void*>(obj_va));
-    });
-
-    g_scan_running.store(false, std::memory_order_release);
-    return nullptr;
-}
-
 static void rejoin_bypass_stub(void* self) {
     // bCanRejoinSession at [UFortRejoinCheck + 0x2a] is false after a server kick.
     // Guard is at RejoinViaSessionInternal+0x2c: LDRB W8,[X0,#0x2a]; CMP W8,#1; B.NE exit.
@@ -201,16 +162,82 @@ static void kick_bypass_stub(void* self, int32_t reason) {
         clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), std::memory_order_relaxed);
     g_rejoin_attempted.store(false, std::memory_order_release);
 
-    log_line("[KickBypass] suppressed reason=%d self=%p - spawning heap scan for UFortRejoinCheck*", r, self);
-    // UFortRejoinCheck is a UGameInstanceSubsystem - not allocated in lobby, only inside a match.
-    // Scan heap here (we ARE inside a match) to find it and call RejoinViaSessionInternal directly.
+    log_line("[KickBypass] suppressed reason=%d self=%p - scanning for UFortRejoinCheck*", r, self);
+    // Scan synchronously on the game thread (we ARE here on the game thread via vtable dispatch).
+    // The EOS session state at [global+0x468+0x0+0xd68] is still < 5 (InProgress) right now.
+    // Using a background thread + dispatch_async introduces ~3ms of latency that lets the
+    // session reach state >= 5 (Ending/Ended), triggering checkf at RejoinViaSessionInternal+0x3c
+    // -> RequestExit(false) -> silent clean UE5 exit (no IPS generated).
+    // 3ms of scan on game thread is a one-frame stutter at most and avoids the race entirely.
     if (g_orig_rejoin && g_rejoin_vtable_va &&
         !g_scan_running.exchange(true, std::memory_order_acq_rel)) {
-        pthread_t t;
-        if (pthread_create(&t, nullptr, rejoin_scan_thread, nullptr) == 0)
-            pthread_detach(t);
-        else
-            g_scan_running.store(false, std::memory_order_release);
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+        void* obj = scan_heap_for_vtable(g_rejoin_vtable_va);
+        uint64_t dt_ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1000000ULL;
+        if (!obj) {
+            log_line("[Reconnect] scan done (%llums) - UFortRejoinCheck NOT FOUND", (unsigned long long)dt_ms);
+        } else {
+            *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<uintptr_t>(obj) + 0x2a) = 1;
+            __asm__ volatile("dmb ish" ::: "memory");
+            log_line("[Reconnect] scan done (%llums) obj=%p bCanRejoinSession forced",
+                     (unsigned long long)dt_ms, obj);
+            // g_rejoin_attempted is set to true ONLY if RejoinViaSessionInternal is actually called.
+            // Setting it here (before the EOS probe) caused the synthetic CT to be skipped even
+            // when the probe failed (kr=1), resulting in a 90s freeze instead of 25s.
+            // Probe EOS session state before calling RejoinViaSessionInternal.
+            // Chain: ADRP(file+0xc25a000) + LDR[+0x468] + LDR[+0] + LDRB[+0xd68]
+            // State must be < 5 (InProgress); >= 5 (Ending/Ended) triggers checkf -> RequestExit.
+            // Use vm_read_overwrite to avoid crashing if the EOS object was freed after the kick.
+            bool eos_state_ok = false;
+            if (g_image_base) {
+                // Step 1: read slot1 from __DATA_CONST (always valid, dyld-fixed).
+                uintptr_t slot1 = 0;
+                vm_size_t nr = 0;
+                kern_return_t kr = vm_read_overwrite(mach_task_self(),
+                    g_image_base + 0xc25a000 + 0x468,
+                    sizeof(uintptr_t),
+                    reinterpret_cast<vm_address_t>(&slot1), &nr);
+                if (kr != KERN_SUCCESS || slot1 == 0) {
+                    log_line("[Reconnect] EOS probe: slot1 read failed kr=%d val=0x%lx", kr, (long)slot1);
+                } else {
+                    // Step 2: read slot2 = *(slot1) safely.
+                    uintptr_t slot2 = 0;
+                    nr = 0;
+                    kr = vm_read_overwrite(mach_task_self(),
+                        slot1,
+                        sizeof(uintptr_t),
+                        reinterpret_cast<vm_address_t>(&slot2), &nr);
+                    if (kr != KERN_SUCCESS || slot2 == 0) {
+                        log_line("[Reconnect] EOS probe: slot2 read failed kr=%d val=0x%lx", kr, (long)slot2);
+                    } else {
+                        // Step 3: read state byte at slot2+0xd68.
+                        uint8_t eos_state = 0xFF;
+                        nr = 0;
+                        kr = vm_read_overwrite(mach_task_self(),
+                            slot2 + 0xd68,
+                            sizeof(uint8_t),
+                            reinterpret_cast<vm_address_t>(&eos_state), &nr);
+                        if (kr != KERN_SUCCESS) {
+                            log_line("[Reconnect] EOS probe: state read failed kr=%d", kr);
+                        } else {
+                            log_line("[Reconnect] EOS session state=%d (must be <5 for rejoin)", (int)eos_state);
+                            if (eos_state < 5) {
+                                eos_state_ok = true;
+                            } else {
+                                log_line("[Reconnect] EOS state >= 5 - rejoin blocked to avoid RequestExit");
+                            }
+                        }
+                    }
+                }
+            }
+            if (eos_state_ok) {
+                g_rejoin_attempted.store(true, std::memory_order_release);
+                log_line("[Reconnect] calling RejoinViaSessionInternal");
+                g_orig_rejoin(obj);
+                log_line("[Reconnect] RejoinViaSessionInternal returned");
+            }
+        }
+        g_scan_running.store(false, std::memory_order_release);
     }
     g_kick_in_orig.store(false, std::memory_order_release);
 }
@@ -246,6 +273,7 @@ void install_kick_bypass() {
     if (!mh) { log_line("[KickBypass] no image header"); return; }
     uintptr_t base  = reinterpret_cast<uintptr_t>(mh);
     intptr_t  slide = static_cast<intptr_t>(base) - static_cast<intptr_t>(0x100000000ULL);
+    g_image_base    = base;
 
     uintptr_t orig_va = base + kKickedFnOffset;
     g_orig_kicked = reinterpret_cast<KickedFn>(orig_va);

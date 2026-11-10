@@ -46,7 +46,7 @@ file builds/dev/FnMacKickFix-V*.dylib
 
 Proxima: pendiente test en partida de lobby return en 25s (V2.1.27).
 
-Actual en VERSION: `2.2.0`
+Actual en VERSION: `2.6.6`
 
 ## Log de diagnostico
 

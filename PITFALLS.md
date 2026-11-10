@@ -13,10 +13,11 @@ silencioso por UE5 GameThread assertions al llamar desde pthread.
 (kInitializeVtableOff=0xd4a4e60) captura self en g_rejoin_check_instance al entrar
 en partida. En kick: dispatch directo sin scan.
 
-**Estado:** V2.6.0 descartada - hook de Initialize no funciona (kInitializeVtableOff es de un vtable
-adyacente en memoria, no el slot de USubsystem::Initialize en UFortRejoinCheck).
-V2.6.1 restaura el heap scan de V2.5.2 con dispatch_async(main_queue). Mecanismo confirmado
-funcionando (scan 3ms). Pendiente deploy y verificacion en partida.
+**Estado:** V2.6.0 descartada. V2.6.1: crash silencioso (UE5 RequestExit). Causa: dispatch_async
+introducia ~3ms de latencia; estado EOS llegaba a >= 5 (Ending) antes de que nuestro bloque
+se ejecutara, disparando checkf en RejoinViaSessionInternal+0x3c (LDRB [X8+0xd68]; CMP W8,#5).
+V2.6.2: scan sincronico en game thread + llamada directa, sin pthread ni dispatch_async.
+Pendiente deploy y verificacion en partida.
 
 ---
 
@@ -170,7 +171,7 @@ v2.0.34 (Z bump: fix en network failure path).
 - [x] V2.1.27: synthetic ConnectionTimeout via dispatch_after(25s, main_queue). VERIFICADO
       2026-11-10: "[NetFailurePatch] synthetic ConnectionTimeout firing (25s early)" aparece
       a exactamente dk=25s. Lobby return limpio sin NCL screen. EXITO.
-- [ ] V2.2.0: vtable patch de RejoinViaSessionInternal instalado y verificado en startup.
+- [x] V2.2.0: vtable patch de RejoinViaSessionInternal instalado y verificado en startup.
       CONFIRMADO 2026-11-10: "[Reconnect] RejoinViaSessionInternal called" NUNCA aparece.
       El path ConnectionTimeout -> ReturningToFrontEnd es directo al lobby y NO pasa por
       RejoinViaSessionInternal. El vtable hook existe pero no tiene trigger.
@@ -178,3 +179,13 @@ v2.0.34 (Z bump: fix en network failure path).
       Requiere encontrar UFortRejoinCheck* desde AFortPlayerControllerAthena (self en kick).
       Buscar con REA: miembro RejoinCheck en PlayerController, offset desde self.
       Alternativa: buscar GEngine->GameInstance->RejoinCheck si no es miembro directo.
+- [x] V2.6.x: RejoinViaSessionInternal INCALLABLE tras reason=144 kick.
+      CONFIRMADO 2026-11-10 con probe vm_read_overwrite en V2.6.4:
+      La cadena [base+0xc25a468] -> slot1 -> slot2 -> [slot2+0xd68] da KERN_INVALID_ADDRESS
+      (kr=1) al leer slot2+0xd68. El EOS session object (slot2) fue liberado por los hilos
+      del EOS SDK ANTES de que ClientWasKicked_Implementation se ejecute en el game thread.
+      Cualquier llamada a g_orig_rejoin(obj) crashea en RejoinViaSessionInternal+0x3c
+      (LDRB W8,[X8,#0xd68]; CMP W8,#5) con acceso a memoria no mapeada -> RequestExit(false).
+      V2.6.4 detecta kr=1 y salta la llamada. El freeze de 25s (V2.1.27) sigue activo.
+      CONCLUSION: el path RejoinViaSessionInternal no es viable para reconexion post-kick.
+      Alternativa: hook mas temprano (antes del teardown EOS) o reconexion desde cero.

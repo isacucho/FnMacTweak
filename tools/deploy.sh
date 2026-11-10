@@ -123,8 +123,10 @@ else
     python3 - "$BIN" "$OLD_LC" "$NEW_LC" <<'PYEOF'
 import sys, struct
 BIN, OLD, NEW = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
-if len(OLD) != len(NEW):
-    sys.exit(f"ERROR: len mismatch OLD={len(OLD)} NEW={len(NEW)} - cannot patch in-place")
+if len(NEW) > len(OLD):
+    sys.exit(f"ERROR: len mismatch OLD={len(OLD)} NEW={len(NEW)} - new string longer, cannot patch in-place")
+if len(NEW) < len(OLD):
+    NEW = NEW + b'\x00' * (len(OLD) - len(NEW))
 with open(BIN, 'rb') as f:
     data = bytearray(f.read())
 idx = data.find(OLD)

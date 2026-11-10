@@ -2,22 +2,43 @@
 
 ## Estado actual
 
-**V2.6.1 compilada. Pendiente deploy+resign.**
+**V2.6.6 deployada. Fix regression V2.6.4: g_rejoin_attempted se seteaba antes del EOS probe, bloqueando el synthetic CT. Freeze 25s (V2.1.27) restaurado. Pendiente verificacion en partida.**
 
-### V2.6.1 - mecanismo (heap scan de V2.5.2 restaurado)
+### V2.6.4 - CONCLUSION: RejoinViaSessionInternal incallable
 
-- V2.6.0 descartada: hook de Initialize no funciona. kInitializeVtableOff=0xd4a4e60 era un
-  vtable de otra clase adyacente en memoria, no el slot de USubsystem::Initialize en
-  UFortRejoinCheck. UFortRejoinCheck* nunca fue capturado.
-- V2.6.1 restaura el scan de V2.5.2:
-  - En kick reason=144: pthread que escanea el heap (vm_region_recurse_64 + vm_read_overwrite)
-    buscando un objeto cuyo vtable pointer sea base+kRejoinVtableOff.
-  - Al encontrarlo: fuerza bCanRejoinSession=1, dispatch_async(main_queue) para llamar
-    RejoinViaSessionInternal en el game thread.
-  - Scan demostrado a 3ms en partida. Sin crash (dispatch_async).
-- kRejoinVtableOff=0xd4a4e70: sigue parcheado (rejoin_bypass_stub fuerza flag si se llama vtable).
+Probe con vm_read_overwrite confirmo: al momento de ClientWasKicked (reason=144),
+el objeto EOS session referenciado por [base+0xc25a468]->slot2 ya esta liberado.
+vm_read_overwrite de slot2+0xd68 retorna kr=1 (KERN_INVALID_ADDRESS).
 
-### Para deployar V2.6.1
+Cadena de punteros (con slide=0x22f0000):
+  [base+0xc25a468] -> slot1 (valid)
+  *slot1 -> slot2 (non-null)
+  vm_read(slot2+0xd68) -> KERN_INVALID_ADDRESS (objeto liberado)
+
+El EOS SDK libera el session object en sus propios hilos antes de que el game thread
+ejecute ClientWasKicked_Implementation. Cualquier llamada a RejoinViaSessionInternal
+crashea en fn+0x3c con acceso a memoria no mapeada -> RequestExit(false) = silent exit.
+
+V2.6.4 bloquea la llamada cuando kr != KERN_SUCCESS. El freeze 25s de V2.1.27 sigue activo.
+
+Comportamiento actual verificado: kick reason=144 -> 25s freeze -> lobby limpio.
+No hay crash silencioso. El rejoin via EOS session no es viable.
+
+### V2.6.2 - fix crash silencioso en RejoinViaSessionInternal (INSUFFICIENTE)
+
+- V2.6.1 crasheaba con salida limpia UE5 (sin IPS). Causa identificada por analisis binario:
+  RejoinViaSessionInternal+0x3c llama una funcion que lee un byte de estado EOS en
+  [global+0x468+0x0+0xd68] y comprueba que sea < 5 (InProgress). Si >= 5 (Ending/Ended),
+  checkf("Attempting to rejoin last session.") dispara -> RequestExit(false) = salida silenciosa.
+  El pthread + dispatch_async de V2.6.1 introducian ~3ms de latencia suficientes para que
+  el game thread procesara el kick y la sesion EOS llegara a estado >= 5 antes de que
+  nuestro bloque se ejecutara en la main queue.
+- V2.6.2: scan sincronico en el game thread (ya estamos en el durante ClientWasKicked) + llamada
+  directa a g_orig_rejoin sin dispatch_async. El estado EOS sigue < 5 en ese momento.
+  Eliminado rejoin_scan_thread y el include de pthread.h.
+- kRejoinVtableOff=0xd4a4e70: sigue parcheado.
+
+### Para deployar V2.6.2
 
 ```bash
 sudo bash tools/deploy.sh && bash tools/resign.sh
@@ -25,9 +46,9 @@ sudo bash tools/deploy.sh && bash tools/resign.sh
 
 Log esperado en kick reason=144:
 ```
-[KickBypass] suppressed reason=144 - spawning heap scan for UFortRejoinCheck*
-[Reconnect] scan done (Xms) obj=0x... bCanRejoinSession forced -> dispatching to main thread
-[Reconnect] RejoinViaSessionInternal firing on main thread obj=0x...
+[KickBypass] suppressed reason=144 self=0x... - scanning for UFortRejoinCheck*
+[Reconnect] scan done (Xms) obj=0x... bCanRejoinSession forced -> calling RejoinViaSessionInternal
+[Reconnect] RejoinViaSessionInternal returned
 ```
 
 ### Mecanismo confirmado (V2.1.24 FnDiag.log + V2.1.25 NCL session)

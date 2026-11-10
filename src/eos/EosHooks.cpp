@@ -27,6 +27,7 @@
 
 /* Opaque handle types */
 typedef void*   EOS_HAntiCheatClient;
+typedef void*   EOS_HSessions;
 typedef int32_t EOS_EResult;
 static const EOS_EResult EOS_Success = 0;
 
@@ -48,6 +49,20 @@ typedef struct {
     int32_t MaxMessageCount;
 } EOS_AntiCheatClient_PollStatusOptions;
 
+/* EOS_Sessions_EndSession options (ApiVersion 1) */
+typedef struct {
+    int32_t     ApiVersion;
+    const char* SessionName;
+} EOS_Sessions_EndSessionOptions;
+typedef void (*EOS_Sessions_OnEndSessionCallback)(const void* Data);
+
+/* EOS_Sessions_DestroySession options (ApiVersion 1) */
+typedef struct {
+    int32_t     ApiVersion;
+    const char* SessionName;
+} EOS_Sessions_DestroySessionOptions;
+typedef void (*EOS_Sessions_OnDestroySessionCallback)(const void* Data);
+
 /* Declared extern "C" so the linker resolves them from EOSSDK.framework at
    runtime; -Wl,-undefined,dynamic_lookup keeps the build happy. */
 extern "C" {
@@ -66,6 +81,18 @@ EOS_EResult EOS_AntiCheatClient_PollStatus(
     const EOS_AntiCheatClient_PollStatusOptions* Options,
     int32_t* OutViolationType,
     void**   OutActionInfo);
+
+EOS_EResult EOS_Sessions_EndSession(
+    EOS_HSessions Handle,
+    const EOS_Sessions_EndSessionOptions* Options,
+    void* ClientData,
+    EOS_Sessions_OnEndSessionCallback CompletionDelegate);
+
+EOS_EResult EOS_Sessions_DestroySession(
+    EOS_HSessions Handle,
+    const EOS_Sessions_DestroySessionOptions* Options,
+    void* ClientData,
+    EOS_Sessions_OnDestroySessionCallback CompletionDelegate);
 }
 
 static EOS_EResult my_BeginSession(
@@ -124,6 +151,42 @@ static EOS_EResult my_PollStatus(
     return r;
 }
 
+/* Diagnostic hooks for EOS session teardown.
+ * Goal: determine order relative to ClientWasKicked in FnDiag.log:
+ *   [EOS] EndSession 'X' called  <-- fires before or after [KickBypass] ClientWasKicked?
+ *   [EOS] DestroySession 'X' called
+ * If EndSession fires BEFORE ClientWasKicked, V2.6.6 will call g_orig_rejoin here
+ * while the EOS session object (slot2+0xd68) is still alive and state < 5.
+ */
+
+static EOS_EResult my_EndSession(
+    EOS_HSessions Handle,
+    const EOS_Sessions_EndSessionOptions* Options,
+    void* ClientData,
+    EOS_Sessions_OnEndSessionCallback CompletionDelegate)
+{
+    const char* name = (Options && Options->SessionName) ? Options->SessionName : "(null)";
+    fndiag::log_line("[EOS] EndSession '%s' called", name);
+    EOS_EResult r = EOS_Sessions_EndSession(Handle, Options, ClientData, CompletionDelegate);
+    fndiag::log_line("[EOS] EndSession '%s' returned result=%d", name, (int)r);
+    return r;
+}
+
+static EOS_EResult my_DestroySession(
+    EOS_HSessions Handle,
+    const EOS_Sessions_DestroySessionOptions* Options,
+    void* ClientData,
+    EOS_Sessions_OnDestroySessionCallback CompletionDelegate)
+{
+    const char* name = (Options && Options->SessionName) ? Options->SessionName : "(null)";
+    fndiag::log_line("[EOS] DestroySession '%s' called", name);
+    EOS_EResult r = EOS_Sessions_DestroySession(Handle, Options, ClientData, CompletionDelegate);
+    fndiag::log_line("[EOS] DestroySession '%s' returned result=%d", name, (int)r);
+    return r;
+}
+
 DYLD_INTERPOSE(my_BeginSession,                  EOS_AntiCheatClient_BeginSession);
 DYLD_INTERPOSE(my_GetSystemRequirementStatus,    EOS_AntiCheatClient_GetSystemRequirementStatus);
 DYLD_INTERPOSE(my_PollStatus,                    EOS_AntiCheatClient_PollStatus);
+DYLD_INTERPOSE(my_EndSession,                    EOS_Sessions_EndSession);
+DYLD_INTERPOSE(my_DestroySession,                EOS_Sessions_DestroySession);
