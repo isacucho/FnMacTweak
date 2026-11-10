@@ -4,19 +4,16 @@ Regla estricta: un error a la vez. No avanzar al siguiente hasta resolver y veri
 
 ---
 
-## ACTIVO: V2.5.0 heap scan crashea el proceso (SIGBUS en pthread)
+## RESUELTO: V2.5.0 heap scan crashea el proceso (SIGBUS + wrong thread)
 
-**Sintoma:** kick reason=144 suprimido, "spawning heap scan" en log, juego muere
-sin crash report.
+**V2.5.1:** `vm_read_overwrite` elimino SIGBUS en el scan. No era la causa real.
+**V2.5.2:** dispatch_async(main_queue) para RejoinViaSessionInternal. Elimino crash
+silencioso por UE5 GameThread assertions al llamar desde pthread.
+**V2.6.0:** heap scan eliminado completamente. Hook en UFortRejoinCheck::Initialize
+(kInitializeVtableOff=0xd4a4e60) captura self en g_rejoin_check_instance al entrar
+en partida. En kick: dispatch directo sin scan.
 
-**Causa:** dereference directo de cada puntero en regiones RW anonimas. Entre
-`vm_region_recurse_64` y el acceso, el allocator puede devolver paginas al kernel:
-SIGBUS en el pthread, proceso muerto sin crash log.
-
-**Fix (V2.5.1):** `vm_read_overwrite` copia en buffer local via Mach IPC. Si la
-region ya no existe, devuelve error y se salta; sin señal fatal.
-
-**Estado:** fix compilado, pendiente deploy y verificacion en partida.
+**Estado:** V2.6.0 compilada. Pendiente deploy y verificacion en partida.
 
 ---
 

@@ -2,35 +2,42 @@
 
 ## Estado actual
 
-**V2.5.0 compilada y commiteada. Pendiente deploy+resign (necesita sudo).**
+**V2.6.0 compilada. Pendiente deploy+resign.**
 
-### V2.5.0 - mecanismo implementado
+### V2.6.0 - mecanismo implementado
 
-- Confirmado: UFortRejoinCheck NO se aloca en lobby (scan 5911MB, 0 instancias).
-  Solo existe dentro de una partida. kick_bypass_stub SI se ejecuta dentro de una partida.
-- En kick_bypass_stub: se lanza pthread `rejoin_scan_thread` que itera todas las
-  regiones RW anonimas via `vm_region_recurse_64`, busca el vtable pointer
-  (base + 0xd4a4e70) en 8-byte increments.
-- Si encuentra el objeto: fuerza `[obj+0x2a]=1` (bCanRejoinSession), marca
-  `g_rejoin_attempted=true`, llama `g_orig_rejoin(obj)` directamente.
-- NetFailurePatcher: el bloque de synthetic CT lee `g_rejoin_attempted` al dispararse
-  (25s); si es true, cancela el lobby return para que el rejoin tenga efecto.
+- Heap scan eliminado por completo (era fragil: scan de 5GB, threading, stale ptrs).
+- Dos nuevos hooks en vtable de UFortRejoinCheck (__DATA_CONST):
+  - kInitializeVtableOff=0xd4a4e60: init_hook_stub captura UFortRejoinCheck* en
+    g_rejoin_check_instance cuando el subsistema se inicializa al entrar en partida.
+  - kRejoinVtableOff=0xd4a4e70: rejoin_bypass_stub sigue presente (fuerza bCanRejoinSession
+    si alguien llama RejoinViaSessionInternal a traves del vtable).
+- En kick reason=144: dispatch_async(main_queue) con g_rejoin_check_instance directamente.
+  O(1), sin pthread, sin scan.
+- Chained fixups confirmados: kInitializeFnOff=0x805c820 (Initialize body),
+  ambos entries en mismo vtable a 2 slots de distancia (confirmado 2026-11-10).
 
-### Para deployar V2.5.0
+### Para deployar V2.6.0
 
 ```bash
 sudo bash tools/deploy.sh && bash tools/resign.sh
 ```
 
-Luego lanzar Fortnite y entrar en partida. Cuando ocurra un kick reason=144, el log
-deberia mostrar:
+Log esperado al entrar en partida (init hook):
 ```
-[KickBypass] suppressed reason=144 ... - spawning heap scan for UFortRejoinCheck*
-[Reconnect] scan done (Xms) obj=0x... bCanRejoinSession forced -> calling RejoinViaSessionInternal
+[Reconnect] Initialize vtable patched: orig=0x... stub=0x... entry=0x...
+[Reconnect] Initialize captured UFortRejoinCheck* 0x...
+```
+
+Log esperado en kick reason=144:
+```
+[KickBypass] suppressed reason=144 - dispatching RejoinViaSessionInternal obj=0x...
+[Reconnect] RejoinViaSessionInternal firing on main thread obj=0x...
 [NetFailurePatch] synthetic CT skipped (rejoin in progress)
 ```
 
-Si en cambio muestra "NOT FOUND", UFortRejoinCheck no estaba alojada en ese momento.
+Si Initialize patch FAILED en startup: el offset kInitializeFnOff es incorrecto
+(actualizar desde binary), la partida habra terminado con "not cached".
 
 ### Mecanismo confirmado (V2.1.24 FnDiag.log + V2.1.25 NCL session)
 

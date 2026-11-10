@@ -2,14 +2,11 @@
 #include "core/DiagLog.hpp"
 
 #include <mach/mach.h>
-#include <mach/vm_map.h>
-#include <mach/vm_region.h>
 #include <mach-o/dyld.h>
 #include <dispatch/dispatch.h>
 #include <cstdint>
 #include <atomic>
 #include <time.h>
-#include <pthread.h>
 
 namespace fndiag {
 
@@ -23,11 +20,21 @@ std::atomic<bool>     g_rejoin_attempted{false};
 //   at ~40s (prior kick). Vtable bypass is the safe path: we only redirect vtable dispatch.
 static constexpr uintptr_t kKickedFnOffset   = 0x858cf18ULL;
 
-// RejoinViaSessionInternal: vtable entry in __DATA_CONST,__const.
-// At runtime dyld resolves to IMAGE_BASE + kRejoinFnOff.
-// Intercepting allows forcing bCanRejoinSession=true (guard at fn+0x2c).
-static constexpr uintptr_t kRejoinFnOff      = 0x805be18ULL;
-static constexpr uintptr_t kRejoinVtableOff  = 0xd4a4e70ULL;
+// UFortRejoinCheck vtable entries in __DATA_CONST,__const.
+// At runtime dyld resolves chained fixups to IMAGE_BASE + kXxxFnOff.
+//
+// Vtable layout (confirmed via chained fixup decode, 2026-11-10):
+//   kInitializeVtableOff  (idx-2 from kRejoinVtableOff): Initialize(FSubsystemCollectionBase&)
+//   idx-1:                                                unknown (0x805b900)
+//   kRejoinVtableOff      (idx 0):                       RejoinViaSessionInternal
+//
+// Hook strategy: intercept Initialize to capture UFortRejoinCheck* at object creation.
+// On reason=144 kick, dispatch RejoinViaSessionInternal(cached_obj) on main thread.
+// No heap scan required.
+static constexpr uintptr_t kInitializeFnOff   = 0x805c820ULL;  // Initialize body (for verification)
+static constexpr uintptr_t kInitializeVtableOff = 0xd4a4e60ULL; // vtable entry for Initialize
+static constexpr uintptr_t kRejoinFnOff        = 0x805be18ULL;
+static constexpr uintptr_t kRejoinVtableOff    = 0xd4a4e70ULL;
 
 // File offset of the disk island for BeginSpectating (written by patch_binary.py).
 // BeginSpectating_Implementation (file 0x81848fc) is a non-virtual UE RPC; its first
@@ -53,106 +60,32 @@ static const uintptr_t kVtableOffsets[] = {
 };
 static constexpr int kVtableCount = static_cast<int>(sizeof(kVtableOffsets) / sizeof(kVtableOffsets[0]));
 
-using KickedFn    = void (*)(void* self, int32_t reason);
+using KickedFn     = void (*)(void* self, int32_t reason);
 using SpectatingFn = void (*)(void* self, void* arg1);
-using RejoinFn    = void (*)(void* self);  // UFortRejoinCheck::RejoinViaSessionInternal
+using RejoinFn     = void (*)(void* self);
+using InitFn       = void (*)(void* self, void* collection);
 
-static KickedFn    g_orig_kicked   = nullptr;
+static KickedFn     g_orig_kicked   = nullptr;
 static SpectatingFn g_orig_spectate = nullptr;
-static RejoinFn    g_orig_rejoin   = nullptr;
+static RejoinFn     g_orig_rejoin   = nullptr;
+static InitFn       g_orig_init     = nullptr;
+
+// Cached UFortRejoinCheck* captured in init_hook_stub when the subsystem initialises.
+// Atomic so kick_bypass_stub (may be on any thread) can read it safely.
+// Cleared to 0 when the match ends (not yet implemented; safe to leave stale since
+// RejoinViaSessionInternal is idempotent and the object lives as long as the game session).
+static std::atomic<uintptr_t> g_rejoin_check_instance{0};
+
 // Re-entrancy guard: kept for safety.
 static std::atomic<bool> g_kick_in_orig{false};
 
-// vtable VA for UFortRejoinCheck, computed in install_kick_bypass.
-// Used by rejoin_scan_thread to search the heap.
-static uintptr_t g_rejoin_vtable_va = 0;
-// Guards against launching multiple concurrent scans.
-static std::atomic<bool> g_scan_running{false};
-
-// Iterate all anonymous RW leaf regions and search for a 64-bit value.
-// Uses vm_read_overwrite to copy into a local buffer - avoids SIGBUS/SIGSEGV
-// if a region is unmapped between vm_region_recurse_64 and our read.
-// Returns the heap address of the first match, or nullptr.
-static void* scan_heap_for_vtable(uintptr_t vtable_va) {
-    static const vm_size_t kChunk = 0x100000; // 1 MB per read call
-    static uint8_t s_buf[kChunk];              // BSS; scan is serialized via g_scan_running
-
-    vm_address_t addr = 0;
-    vm_size_t    size = 0;
-    while (addr < 0x700000000000ULL) {
-        natural_t depth = 100;
-        vm_region_submap_info_data_64_t info;
-        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
-        kern_return_t kr = vm_region_recurse_64(
-            mach_task_self(), &addr, &size, &depth,
-            (vm_region_recurse_info_t)&info, &count);
-        if (kr != KERN_SUCCESS || size == 0) break;
-
-        bool is_rw = (info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE);
-        if (!info.is_submap && is_rw && !info.external_pager && size >= 8) {
-            vm_size_t off = 0;
-            while (off < size) {
-                vm_size_t chunk = (size - off < kChunk) ? (size - off) : kChunk;
-                vm_size_t nread = chunk;
-                kr = vm_read_overwrite(mach_task_self(),
-                                       addr + off, chunk,
-                                       reinterpret_cast<vm_address_t>(s_buf), &nread);
-                if (kr == KERN_SUCCESS && nread >= 8) {
-                    const uint8_t* p   = s_buf;
-                    const uint8_t* end = s_buf + nread - 7;
-                    while (p < end) {
-                        if (*reinterpret_cast<const uintptr_t*>(p) == vtable_va) {
-                            return reinterpret_cast<void*>(addr + off + (p - s_buf));
-                        }
-                        p += 8;
-                    }
-                }
-                off += chunk;
-            }
-        }
-        addr += size;
-    }
-    return nullptr;
-}
-
-// Pthread body: scans heap for UFortRejoinCheck*, forces bCanRejoinSession=1,
-// calls RejoinViaSessionInternal if found.
-static void* rejoin_scan_thread(void*) {
-    if (!g_rejoin_vtable_va || !g_orig_rejoin) {
-        g_scan_running.store(false, std::memory_order_release);
-        return nullptr;
-    }
-    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    void* obj = scan_heap_for_vtable(g_rejoin_vtable_va);
-    uint64_t dt_ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1000000ULL;
-
-    if (!obj) {
-        log_line("[Reconnect] scan done (%llums) - UFortRejoinCheck NOT FOUND (match not started?)",
-                 (unsigned long long)dt_ms);
-        g_scan_running.store(false, std::memory_order_release);
-        return nullptr;
-    }
-
-    // Force bCanRejoinSession flag before the guard check at RejoinViaSessionInternal+0x2c.
-    *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<uintptr_t>(obj) + 0x2a) = 1;
-    __asm__ volatile("dmb ish" ::: "memory");
-
-    // Mark before dispatching so NetFailurePatcher synthetic CT sees it at t=25s.
-    g_rejoin_attempted.store(true, std::memory_order_release);
-    log_line("[Reconnect] scan done (%llums) obj=%p bCanRejoinSession forced -> dispatching to main thread",
-             (unsigned long long)dt_ms, obj);
-
-    // RejoinViaSessionInternal must run on the game thread (= main thread on iOS).
-    // Calling from a background pthread causes a silent crash (UE5 GameThread assertions).
-    uintptr_t obj_va = reinterpret_cast<uintptr_t>(obj);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        log_line("[Reconnect] RejoinViaSessionInternal firing on main thread obj=%p",
-                 reinterpret_cast<void*>(obj_va));
-        if (g_orig_rejoin) g_orig_rejoin(reinterpret_cast<void*>(obj_va));
-    });
-
-    g_scan_running.store(false, std::memory_order_release);
-    return nullptr;
+// Called when UFortRejoinCheck::Initialize(FSubsystemCollectionBase&) is dispatched
+// through the vtable. Captures `self` for use in kick_bypass_stub without any heap scan.
+static void init_hook_stub(void* self, void* collection) {
+    g_rejoin_check_instance.store(reinterpret_cast<uintptr_t>(self),
+                                   std::memory_order_release);
+    log_line("[Reconnect] Initialize captured UFortRejoinCheck* %p", self);
+    if (g_orig_init) g_orig_init(self, collection);
 }
 
 static void rejoin_bypass_stub(void* self) {
@@ -201,17 +134,25 @@ static void kick_bypass_stub(void* self, int32_t reason) {
         clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), std::memory_order_relaxed);
     g_rejoin_attempted.store(false, std::memory_order_release);
 
-    log_line("[KickBypass] suppressed reason=%d self=%p - spawning heap scan for UFortRejoinCheck*", r, self);
-    // UFortRejoinCheck is a UGameInstanceSubsystem - not allocated in lobby, only inside a match.
-    // Scan heap here (we ARE inside a match) to find it and call RejoinViaSessionInternal directly.
-    if (g_orig_rejoin && g_rejoin_vtable_va &&
-        !g_scan_running.exchange(true, std::memory_order_acq_rel)) {
-        pthread_t t;
-        if (pthread_create(&t, nullptr, rejoin_scan_thread, nullptr) == 0)
-            pthread_detach(t);
-        else
-            g_scan_running.store(false, std::memory_order_release);
+    uintptr_t cached = g_rejoin_check_instance.load(std::memory_order_acquire);
+    if (cached && g_orig_rejoin) {
+        g_rejoin_attempted.store(true, std::memory_order_release);
+        log_line("[KickBypass] suppressed reason=%d self=%p - dispatching RejoinViaSessionInternal obj=0x%lx",
+                 r, self, (long)cached);
+        // RejoinViaSessionInternal must run on the game thread (= main thread on iOS).
+        dispatch_async(dispatch_get_main_queue(), ^{
+            void* obj = reinterpret_cast<void*>(cached);
+            log_line("[Reconnect] RejoinViaSessionInternal firing on main thread obj=%p", obj);
+            // Force bCanRejoinSession flag before the guard check at RejoinViaSessionInternal+0x2c.
+            *reinterpret_cast<volatile uint8_t*>(cached + 0x2a) = 1;
+            __asm__ volatile("dmb ish" ::: "memory");
+            g_orig_rejoin(obj);
+        });
+    } else {
+        log_line("[KickBypass] suppressed reason=%d self=%p - UFortRejoinCheck not cached (match not started?)",
+                 r, self);
     }
+
     g_kick_in_orig.store(false, std::memory_order_release);
 }
 
@@ -261,6 +202,24 @@ void install_kick_bypass() {
     log_line("[KickBypass] vtable patch: %d/%d entries patched slide=0x%lx orig=0x%lx stub=0x%lx",
              patched, kVtableCount, (long)slide, (long)orig_va, (long)stub_va);
 
+    // --- UFortRejoinCheck::Initialize vtable hook ---
+    // Intercepts the first call to Initialize when the subsystem enters a match.
+    // Captures `self` (UFortRejoinCheck*) in g_rejoin_check_instance so kick_bypass_stub
+    // can call RejoinViaSessionInternal directly without any heap scan.
+    uintptr_t init_orig_va = base + kInitializeFnOff;
+    uintptr_t init_stub_va = reinterpret_cast<uintptr_t>(init_hook_stub);
+    mach_vm_address_t init_entry = static_cast<mach_vm_address_t>(base + kInitializeVtableOff);
+    g_orig_init = reinterpret_cast<InitFn>(init_orig_va);
+    if (patch_vtable_entry(init_entry, init_orig_va, init_stub_va)) {
+        log_line("[Reconnect] Initialize vtable patched: orig=0x%lx stub=0x%lx entry=0x%lx",
+                 (long)init_orig_va, (long)init_stub_va, (long)init_entry);
+    } else {
+        log_line("[Reconnect] Initialize vtable patch FAILED (entry=0x%lx val=0x%lx expected=0x%lx)",
+                 (long)init_entry,
+                 (long)*reinterpret_cast<volatile uintptr_t*>(init_entry),
+                 (long)init_orig_va);
+    }
+
     // --- RejoinViaSessionInternal vtable hook ---
     // UFortRejoinCheck::RejoinViaSessionInternal has 1 vtable entry.
     // At runtime dyld resolves the chained fixup to IMAGE_BASE + kRejoinFnOff.
@@ -268,13 +227,12 @@ void install_kick_bypass() {
     uintptr_t rejoin_orig_va   = base + kRejoinFnOff;
     uintptr_t rejoin_stub_va   = reinterpret_cast<uintptr_t>(rejoin_bypass_stub);
     mach_vm_address_t rejoin_entry = static_cast<mach_vm_address_t>(base + kRejoinVtableOff);
-    g_orig_rejoin        = reinterpret_cast<RejoinFn>(rejoin_orig_va);
-    g_rejoin_vtable_va   = base + kRejoinVtableOff; // heap scan target: objects holding this VA
+    g_orig_rejoin = reinterpret_cast<RejoinFn>(rejoin_orig_va);
     if (patch_vtable_entry(rejoin_entry, rejoin_orig_va, rejoin_stub_va)) {
-        log_line("[Reconnect] vtable patched: orig=0x%lx stub=0x%lx entry=0x%lx",
+        log_line("[Reconnect] RejoinViaSessionInternal vtable patched: orig=0x%lx stub=0x%lx entry=0x%lx",
                  (long)rejoin_orig_va, (long)rejoin_stub_va, (long)rejoin_entry);
     } else {
-        log_line("[Reconnect] vtable patch FAILED for RejoinViaSessionInternal");
+        log_line("[Reconnect] RejoinViaSessionInternal vtable patch FAILED");
     }
 
     // --- BeginSpectating disk island hook ---
