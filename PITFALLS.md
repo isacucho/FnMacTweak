@@ -13,7 +13,10 @@ silencioso por UE5 GameThread assertions al llamar desde pthread.
 (kInitializeVtableOff=0xd4a4e60) captura self en g_rejoin_check_instance al entrar
 en partida. En kick: dispatch directo sin scan.
 
-**Estado:** V2.6.0 compilada. Pendiente deploy y verificacion en partida.
+**Estado:** V2.6.0 descartada - hook de Initialize no funciona (kInitializeVtableOff es de un vtable
+adyacente en memoria, no el slot de USubsystem::Initialize en UFortRejoinCheck).
+V2.6.1 restaura el heap scan de V2.5.2 con dispatch_async(main_queue). Mecanismo confirmado
+funcionando (scan 3ms). Pendiente deploy y verificacion en partida.
 
 ---
 

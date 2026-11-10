@@ -2,42 +2,33 @@
 
 ## Estado actual
 
-**V2.6.0 compilada. Pendiente deploy+resign.**
+**V2.6.1 compilada. Pendiente deploy+resign.**
 
-### V2.6.0 - mecanismo implementado
+### V2.6.1 - mecanismo (heap scan de V2.5.2 restaurado)
 
-- Heap scan eliminado por completo (era fragil: scan de 5GB, threading, stale ptrs).
-- Dos nuevos hooks en vtable de UFortRejoinCheck (__DATA_CONST):
-  - kInitializeVtableOff=0xd4a4e60: init_hook_stub captura UFortRejoinCheck* en
-    g_rejoin_check_instance cuando el subsistema se inicializa al entrar en partida.
-  - kRejoinVtableOff=0xd4a4e70: rejoin_bypass_stub sigue presente (fuerza bCanRejoinSession
-    si alguien llama RejoinViaSessionInternal a traves del vtable).
-- En kick reason=144: dispatch_async(main_queue) con g_rejoin_check_instance directamente.
-  O(1), sin pthread, sin scan.
-- Chained fixups confirmados: kInitializeFnOff=0x805c820 (Initialize body),
-  ambos entries en mismo vtable a 2 slots de distancia (confirmado 2026-11-10).
+- V2.6.0 descartada: hook de Initialize no funciona. kInitializeVtableOff=0xd4a4e60 era un
+  vtable de otra clase adyacente en memoria, no el slot de USubsystem::Initialize en
+  UFortRejoinCheck. UFortRejoinCheck* nunca fue capturado.
+- V2.6.1 restaura el scan de V2.5.2:
+  - En kick reason=144: pthread que escanea el heap (vm_region_recurse_64 + vm_read_overwrite)
+    buscando un objeto cuyo vtable pointer sea base+kRejoinVtableOff.
+  - Al encontrarlo: fuerza bCanRejoinSession=1, dispatch_async(main_queue) para llamar
+    RejoinViaSessionInternal en el game thread.
+  - Scan demostrado a 3ms en partida. Sin crash (dispatch_async).
+- kRejoinVtableOff=0xd4a4e70: sigue parcheado (rejoin_bypass_stub fuerza flag si se llama vtable).
 
-### Para deployar V2.6.0
+### Para deployar V2.6.1
 
 ```bash
 sudo bash tools/deploy.sh && bash tools/resign.sh
 ```
 
-Log esperado al entrar en partida (init hook):
-```
-[Reconnect] Initialize vtable patched: orig=0x... stub=0x... entry=0x...
-[Reconnect] Initialize captured UFortRejoinCheck* 0x...
-```
-
 Log esperado en kick reason=144:
 ```
-[KickBypass] suppressed reason=144 - dispatching RejoinViaSessionInternal obj=0x...
+[KickBypass] suppressed reason=144 - spawning heap scan for UFortRejoinCheck*
+[Reconnect] scan done (Xms) obj=0x... bCanRejoinSession forced -> dispatching to main thread
 [Reconnect] RejoinViaSessionInternal firing on main thread obj=0x...
-[NetFailurePatch] synthetic CT skipped (rejoin in progress)
 ```
-
-Si Initialize patch FAILED en startup: el offset kInitializeFnOff es incorrecto
-(actualizar desde binary), la partida habra terminado con "not cached".
 
 ### Mecanismo confirmado (V2.1.24 FnDiag.log + V2.1.25 NCL session)
 
