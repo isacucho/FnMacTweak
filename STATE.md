@@ -2,7 +2,35 @@
 
 ## Estado actual
 
-**V2.2.0 compilada, pendiente deploy+resign manual (requiere sudo en terminal).**
+**V2.5.0 compilada y commiteada. Pendiente deploy+resign (necesita sudo).**
+
+### V2.5.0 - mecanismo implementado
+
+- Confirmado: UFortRejoinCheck NO se aloca en lobby (scan 5911MB, 0 instancias).
+  Solo existe dentro de una partida. kick_bypass_stub SI se ejecuta dentro de una partida.
+- En kick_bypass_stub: se lanza pthread `rejoin_scan_thread` que itera todas las
+  regiones RW anonimas via `vm_region_recurse_64`, busca el vtable pointer
+  (base + 0xd4a4e70) en 8-byte increments.
+- Si encuentra el objeto: fuerza `[obj+0x2a]=1` (bCanRejoinSession), marca
+  `g_rejoin_attempted=true`, llama `g_orig_rejoin(obj)` directamente.
+- NetFailurePatcher: el bloque de synthetic CT lee `g_rejoin_attempted` al dispararse
+  (25s); si es true, cancela el lobby return para que el rejoin tenga efecto.
+
+### Para deployar V2.5.0
+
+```bash
+sudo bash tools/deploy.sh && bash tools/resign.sh
+```
+
+Luego lanzar Fortnite y entrar en partida. Cuando ocurra un kick reason=144, el log
+deberia mostrar:
+```
+[KickBypass] suppressed reason=144 ... - spawning heap scan for UFortRejoinCheck*
+[Reconnect] scan done (Xms) obj=0x... bCanRejoinSession forced -> calling RejoinViaSessionInternal
+[NetFailurePatch] synthetic CT skipped (rejoin in progress)
+```
+
+Si en cambio muestra "NOT FOUND", UFortRejoinCheck no estaba alojada en ese momento.
 
 ### Mecanismo confirmado (V2.1.24 FnDiag.log + V2.1.25 NCL session)
 
