@@ -14,5 +14,6 @@ extern std::atomic<uint64_t> g_last_kick_suppressed_ns;
 extern std::atomic<bool> g_rejoin_attempted;
 
 void install_kick_bypass();
+void install_validation_patch();
 
 } // namespace fndiag

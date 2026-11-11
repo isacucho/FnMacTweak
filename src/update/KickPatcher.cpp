@@ -314,4 +314,39 @@ void install_kick_bypass() {
     }
 }
 
+// ============================================================
+// Validation Patch
+// The virtual function at kValidationFnOff (vtable slot kValidationVtableOff)
+// checks performance counters and, on failure, calls kick dispatch at 0x1074b7bcc
+// with reason codes 10 and 6. Replacing the vtable entries with validation_pass_stub
+// makes the validator always "pass" before any kick dispatch is reached.
+// kValidation2* covers the companion slot that fires reason=6.
+// ============================================================
+
+static constexpr uintptr_t kValidationVtableOff  = 0xcd32e18ULL;
+static constexpr uintptr_t kValidationFnOff      = 0x74c1334ULL;
+static constexpr uintptr_t kValidation2VtableOff = 0xcd32df8ULL;
+static constexpr uintptr_t kValidation2FnOff     = 0x74c13b8ULL;
+
+static uintptr_t validation_pass_stub(void* /*self*/, uintptr_t, uintptr_t, uintptr_t) {
+    return 0;
+}
+
+void install_validation_patch() {
+    const mach_header* mh = _dyld_get_image_header(0);
+    if (!mh) { log_line("[ValidationPatch] no image header"); return; }
+    uintptr_t base     = reinterpret_cast<uintptr_t>(mh);
+    uintptr_t stub_va  = reinterpret_cast<uintptr_t>(validation_pass_stub);
+
+    uintptr_t orig1 = base + kValidationFnOff;
+    bool ok1 = patch_vtable_entry(base + kValidationVtableOff, orig1, stub_va);
+
+    uintptr_t orig2 = base + kValidation2FnOff;
+    bool ok2 = patch_vtable_entry(base + kValidation2VtableOff, orig2, stub_va);
+
+    log_line("[ValidationPatch] slot1(r=10)=%s slot2(r=6)=%s stub=0x%lx orig1=0x%lx orig2=0x%lx",
+             ok1 ? "ok" : "FAIL", ok2 ? "ok" : "FAIL",
+             (long)stub_va, (long)orig1, (long)orig2);
+}
+
 } // namespace fndiag

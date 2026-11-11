@@ -25,29 +25,57 @@ codesign --force --sign "$IDENTITY" \
   --preserve-metadata=identifier,entitlements,flags \
   "$APP/Frameworks/$DYLIB_NAME"
 
-# 3. Re-firmar el bundle preservando plataforma iOS.
-# --force en un bundle iOS en macOS sobreescribe LC_BUILD_VERSION platform=IOS
-# con platform=macOS (0) en la firma CD -> AMFI lo mata con "Binary with wrong platform".
-# Fix: extraer entitlements, quitar firma, re-firmar sin --force para que codesign
-# auto-detecte platform=IOS desde LC_BUILD_VERSION del binario.
-echo "[3/4] Re-firmando bundle (preservando plataforma iOS)..."
-ENTS_TMP=$(mktemp /tmp/fn_ents.XXXXXX)
-# deploy.sh ya quitó la firma del bundle via sudo codesign --remove-signature,
-# así que el binario puede no tener entitlements que extraer. Fallback al backup.
-codesign -d --entitlements :- "$BIN" 2>/dev/null > "$ENTS_TMP" || true
+# 3. Re-firmar el bundle.
+# ADVERTENCIA: codesign en macOS siempre escribe VersionPlatform=0 (macOS) en el
+# CodeDirectory, independientemente de --force y de LC_BUILD_VERSION platform=IOS.
+# Tras ejecutar resign.sh, Fortnite NO lanzara hasta re-sideloadear el IPA con
+# Sideloadly (que firma correctamente con VersionPlatform=2 (IOS)).
+# resign.sh es util solo para actualizar el dylib o parchear el binario antes
+# de regenerar el IPA.
+echo "[3/4] Re-firmando bundle (VersionPlatform quedara 0 / macOS)..."
+ENTS_TMP=$(mktemp)
+trap "rm -f '$ENTS_TMP'" EXIT
+# Fuente de entitlements (prioridad descendente):
+# 1. embedded.mobileprovision del bundle (creado por Sideloadly, siempre presente)
+# 2. Binario firmado (solo si Sideloadly no ha sido ejecutado aun)
+# 3. Backup pre_fnpatch
+PROVISION="$APP/embedded.mobileprovision"
+if [ -f "$PROVISION" ]; then
+    echo "  (extrayendo entitlements de embedded.mobileprovision...)"
+    python3 - "$PROVISION" "$ENTS_TMP" << 'PYEOF'
+import sys, re, plistlib
+data = open(sys.argv[1], 'rb').read()
+start = data.find(b'<?xml'); end = data.rfind(b'</plist>') + len(b'</plist>')
+profile = plistlib.loads(data[start:end])
+ents = profile.get('Entitlements', {})
+with open(sys.argv[2], 'wb') as f:
+    plistlib.dump(ents, f)
+print(f"  entitlements extraidos: {list(ents.keys())}")
+PYEOF
+fi
+if [ ! -s "$ENTS_TMP" ]; then
+    codesign -d --entitlements :- "$BIN" 2>/dev/null > "$ENTS_TMP" || true
+fi
 if [ ! -s "$ENTS_TMP" ] && [ -f "${BIN}.pre_fnpatch" ]; then
     echo "  (extrayendo entitlements del backup pre_fnpatch...)"
     codesign -d --entitlements :- "${BIN}.pre_fnpatch" 2>/dev/null > "$ENTS_TMP" || true
+fi
+# Patch LSRequiresIPhoneOS: sin esto macOS bloquea el launch con
+# "developer did not intend for it to run on this Mac".
+# Esta key vuelve a true cada vez que se re-sideloadea la app.
+INFOPLIST="$APP/Info.plist"
+if [ -f "$INFOPLIST" ]; then
+    /usr/libexec/PlistBuddy -c "Set :LSRequiresIPhoneOS false" "$INFOPLIST" 2>/dev/null && \
+        echo "  LSRequiresIPhoneOS -> false" || \
+        echo "  AVISO: no se pudo parchear LSRequiresIPhoneOS"
 fi
 codesign --remove-signature "$APP" 2>/dev/null || true
 if [ -s "$ENTS_TMP" ]; then
     codesign --sign "$IDENTITY" --entitlements "$ENTS_TMP" "$APP"
 else
-    echo "  (sin entitlements encontrados, firmando sin --entitlements)"
+    echo "  AVISO: sin entitlements, firmando sin --entitlements (sandbox fallara)"
     codesign --sign "$IDENTITY" "$APP"
 fi
-rm -f "$ENTS_TMP"
-
 # Verificar + mostrar CDHash resultante del ejecutable
 echo ""
 echo "[Verificando...]"
@@ -57,22 +85,20 @@ echo "CDHash ejecutable post-resign:"
 codesign -d --verbose=4 "$BIN" 2>&1 | grep -E "CDHash|VersionPlatform|Format|Sealed"
 
 
-# 4. Re-firmar el wrapper externo /Applications/Fortnite.app.
-# Su CodeResources cubre el inner bundle: cuando re-firmamos la inner,
-# el outer queda con 'invalid signature' y macOS rechaza el launch.
-# Mismo enfoque: --remove-signature + sign sin --force para preservar
-# la plataforma iOS del ejecutable.
+# 4. Outer wrapper /Applications/Fortnite.app: NO re-firmar.
+# El outer no tiene ejecutable ni Info.plist propios; Sideloadly lo firma
+# usando el binario iOS via symlink WrappedBundle. Cuando resign.sh vuelve
+# a firmar el outer con nuestro cert, Gatekeeper preflight falla con -10673.
+# Dejar la firma original de Sideloadly intacta (CDHash ya no coincide tras
+# re-firmar el inner, pero Gatekeeper acepta eso para iOS-on-Mac wrappers).
 OUTER="/Applications/Fortnite.app"
-echo "[4/4] Re-firmando wrapper externo..."
-ENTS_OUTER=$(mktemp /tmp/fn_outer_ents.XXXXXX)
-codesign -d --entitlements :- "$BIN" 2>/dev/null > "$ENTS_OUTER" || true
-codesign --remove-signature "$OUTER" 2>/dev/null || true
-codesign --sign "$IDENTITY" --entitlements "$ENTS_OUTER" "$OUTER"
-rm -f "$ENTS_OUTER"
-codesign -v "$OUTER" 2>&1 && echo "OK: outer wrapper firma valida" || echo "ERROR: outer wrapper firma invalida"
-# Quitar quarantine del outer para que Gatekeeper no bloquee el launch.
+echo "[4/4] Outer wrapper: conservando firma Sideloadly (no re-firmar)..."
+codesign -d --verbose=1 "$OUTER" 2>&1 | grep -E "Identifier|Authority|VersionPlatform" || true
+# Solo quitar quarantine para que Gatekeeper no bloquee el launch.
 sudo xattr -cr "$OUTER" 2>/dev/null || true
 echo "xattrs outer: $(xattr "$OUTER" 2>/dev/null | tr '\n' ' ' || echo '(ninguno)')"
 
 echo ""
-echo "=== Listo. Lanza Fortnite. ==="
+echo "=== Listo. ==="
+echo "ADVERTENCIA: VersionPlatform=0 (macOS) en CodeDirectory."
+echo "Para lanzar Fortnite: regenera el IPA e instala con Sideloadly."

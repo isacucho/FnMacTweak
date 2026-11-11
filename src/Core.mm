@@ -70,6 +70,8 @@ __attribute__((constructor)) static void fncompat_init() {
         // and calls the original only for 2/4 (WasBanned/CrossPlayRestriction).
         fndiag::install_kick_bypass();
         BOOT_PROBE("5_kick_bypass_done");
+        fndiag::install_validation_patch();
+        BOOT_PROBE("5a_validation_patch_done");
         fndiag::install_customization_patch();
         BOOT_PROBE("5b_customization_patch_done");
         fndiag::install_nmt_patch();
