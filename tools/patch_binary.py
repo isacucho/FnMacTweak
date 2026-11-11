@@ -77,7 +77,7 @@ BNF_OFFSET = 0x5642c74  # file offset of BnfFn (kBnfOffset in NetFailurePatcher.
 # Island layout (28 bytes):
 #   +0:  ADRP X16, slot_page         (page of __bss slot, same 4KB page as SPEC ADRP)
 #   +4:  LDR  X16, [X16, #0x890]     (dereference: 0=dylib not ready, nonzero=stub addr)
-#   +8:  CBNZ X16, +12               (slot nonzero → call stub at +12; zero → execute_original at +20)
+#   +8:  CBZ  X16, +12               (slot==0 → execute_original at +20; nonzero → fall through to BR)
 #   +12: BR   X16                    (tail-call customization_failed_stub, LR intact)
 #   +16: RET                         (unreachable safety)
 #   +20: STP  X28, X27, [SP, #-0x50]! (original insn0 of fn at 0xa30b698)
@@ -89,7 +89,7 @@ CUSTOM_SLOT_OFF   = 0x12bfa890  # __bss DATA slot for customization_failed_stub
 CUSTOM_ISLAND_BYTES = bytes.fromhex(
     'b09503b0'  # ADRP X16, page(0x112BFA000) [same encoding as SPEC; same 4KB page]
     '104a44f9'  # LDR  X16, [X16, #0x890]  → reads *0x112BFA890 (__bss slot)
-    '700000b5'  # CBNZ X16, +12  (slot==0 → skip BR, go to execute_original at +20)
+    '700000b4'  # CBZ  X16, +12  (slot==0 → execute_original at +20; nonzero → BR stub)
     '00021fd6'  # BR   X16  (tail-call customization_failed_stub)
     'c0035fd6'  # RET  (unreachable safety)
     'fc6fbba9'  # STP X28,X27,[SP,#-0x50]!  (original insn0 of 0xa30b698)
@@ -158,7 +158,7 @@ SPEC_SLOT_OFF   = 0x12bfa888  # __bss DATA slot for begin_spectating_stub
 SPEC_ISLAND_BYTES = bytes.fromhex(
     'b09503b0'  # ADRP X16, page(0x112BFA000) -> word 0xB00395B0 in LE bytes
     '104644f9'  # LDR  X16, [X16, #0x888]  → reads *0x112BFA888 (__bss slot)
-    '700000b5'  # CBNZ X16, +12  (slot==0 → skip BR, go to execute_original at +20)
+    '700000b4'  # CBZ  X16, +12  (slot==0 → execute_original at +20; nonzero → BR stub)
     '00021fd6'  # BR   X16  (tail-call begin_spectating_stub)
     'c0035fd6'  # RET  (unreachable safety)
     'fd7b03a9'  # STP  X29, X30, [SP, #-N]!  (original insn0 of BeginSpectating)
