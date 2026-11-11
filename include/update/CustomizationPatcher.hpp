@@ -3,24 +3,24 @@
 
 namespace fndiag {
 
-// Vtable pointer patch for HandleCustomizationFailed (UFortCustomizationAssetLoader).
-// Redirects the vtable slot in __DATA_CONST to our no-op stub so the game never
-// increments NumLoadCustomizationFailed and the server never sends reason=144.
+// Disk island patch for execHandleCustomizationFailed (UE4 UFunction wrapper).
+// The function's first instruction on-disk is replaced with B to an island in
+// __TEXT.__const padding (patch_binary.py --apply). The island checks a __bss
+// slot: if zero (dylib not installed), it falls through to the original insn;
+// if nonzero, it tail-calls our no-op stub so the game never increments
+// NumLoadCustomizationFailed and the server never sends reason=144.
 //
-// Patching __DATA_CONST (not __TEXT) avoids the CS_KILL enforcement that fires
-// when a modified __TEXT page is executed on this iOS-platform binary.
-//
-// kHandleCustomizationFailedVtableOff: offset from image base to the vtable slot
-// (8-byte pointer) that holds HandleCustomizationFailed's address at runtime.
-// Zero = patch disabled.
-//
-// To discover: run Fortnite with LLDB attached, then:
-//   (lldb) command script import tools/lldb_diag.py
-//   (lldb) lcf_find_ptr
-// The command prints "ptr_offset_from_base=0x<hex>" - copy that here.
-// (Also run lcf_find to get the function offset for reference.)
+// Function entry: file offset 0xa30b698 (STP X28,X27,[SP,#-0x50]!), called via
+// UE4 UFunction dispatch (void return, no call-site null-check issues).
+// Island:         file offset 0xb945ba0 (__TEXT.__const zero-padding).
+// __bss slot:     image_base + 0x12bfa890 (written at runtime by install_customization_patch).
 
-static constexpr uint64_t kHandleCustomizationFailedVtableOff = 0ULL; // fill after lcf_find_ptr
+static constexpr uintptr_t kCustomFnOff     = 0xa30b698ULL;
+static constexpr uintptr_t kCustomIslandOff = 0xb945ba0ULL;
+static constexpr uintptr_t kCustomSlotOff   = 0x12bfa890ULL;
+
+// First 4 bytes of the island (LDR word at island+4) used to verify the patch is applied.
+static constexpr uint32_t  kCustomIslandLdr = 0xF9444A10U; // LDR X16,[X16,#0x890]
 
 void install_customization_patch();
 

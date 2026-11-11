@@ -1,82 +1,46 @@
 #include "update/CustomizationPatcher.hpp"
 #include "core/DiagLog.hpp"
 
-#include <mach/mach.h>
 #include <mach-o/dyld.h>
 #include <cstdint>
-#include <cstring>
 
 namespace fndiag {
 namespace {
 
-// Stub returned to the game in place of HandleCustomizationFailed.
-// The original increments NumLoadCustomizationFailed; with this the counter
-// stays at 0 so the server never sends reason=144.
+// Stub tail-called by the island in place of execHandleCustomizationFailed.
+// Because HandleCustomizationFailed is a void UFunction, the stub just returns.
+// The counter NumLoadCustomizationFailed is never incremented -> server cannot
+// send reason=144 kicks.
 static void __attribute__((noinline, used)) customization_failed_stub() {}
-
-// Write an 8-byte pointer into __DATA_CONST.  The segment is mapped r/o
-// after dyld resolves chained fixups, so vm_protect(COPY) is needed.
-// Unlike __TEXT, __DATA_CONST pages carry no code-signing hash, so the
-// kernel does NOT enforce CS_KILL on the write -- same mechanic used by
-// KickPatcher for ClientWasKicked.
-static bool write_ptr(uintptr_t addr, uintptr_t val) {
-    vm_address_t page = addr & ~(vm_size_t)(PAGE_SIZE - 1);
-    kern_return_t kr;
-
-    kr = vm_protect(mach_task_self(), page, PAGE_SIZE, false,
-                    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) {
-        log_line("[CustomPatch] vm_protect rw kr=%d addr=0x%lx", kr, (unsigned long)addr);
-        return false;
-    }
-    *reinterpret_cast<volatile uintptr_t*>(addr) = val;
-    __asm__ volatile("dsb ish" ::: "memory");
-    kr = vm_protect(mach_task_self(), page, PAGE_SIZE, false, VM_PROT_READ);
-    if (kr != KERN_SUCCESS) {
-        log_line("[CustomPatch] vm_protect r kr=%d addr=0x%lx", kr, (unsigned long)addr);
-        return false;
-    }
-    return true;
-}
 
 } // namespace
 
 void install_customization_patch() {
-    if (kHandleCustomizationFailedVtableOff == 0) {
-        log_line("[CustomPatch] vtable offset not set - run lcf_find_ptr in LLDB:");
-        log_line("[CustomPatch]   lldb -p $(pgrep FortniteClient-IOS)");
-        log_line("[CustomPatch]   command script import tools/lldb_diag.py");
-        log_line("[CustomPatch]   lcf_find_ptr");
-        log_line("[CustomPatch]   fill kHandleCustomizationFailedVtableOff and rebuild");
+    const mach_header* mh = _dyld_get_image_header(0);
+    if (!mh) {
+        log_line("[CustomPatch] FAIL: no image header");
+        return;
+    }
+    uintptr_t base = (uintptr_t)mh;
+
+    // Verify the disk island is in place (patch_binary.py --apply must have run).
+    // Check the LDR word at island+4: LDR X16,[X16,#0x890] = 0xF9444A10.
+    auto* island = reinterpret_cast<const uint32_t*>(base + kCustomIslandOff);
+    if (island[1] != kCustomIslandLdr) {
+        log_line("[CustomPatch] island not found at 0x%lx (got 0x%08x, want 0x%08x)",
+                 (unsigned long)(base + kCustomIslandOff), island[1], kCustomIslandLdr);
+        log_line("[CustomPatch]   run: python3 tools/patch_binary.py --apply && bash tools/resign.sh");
         return;
     }
 
-    uintptr_t img_base = 0;
-    for (uint32_t i = 0; i < _dyld_image_count(); ++i) {
-        const char* name = _dyld_get_image_name(i);
-        if (name && (strstr(name, "FortniteClient") || i == 0)) {
-            img_base = (uintptr_t)_dyld_get_image_header(i);
-            if (img_base) break;
-        }
-    }
-    if (!img_base) {
-        log_line("[CustomPatch] FAIL: could not resolve image base");
-        return;
-    }
+    // Write stub address to __bss slot. The island reads this at dispatch time:
+    // nonzero -> tail-call our stub; zero -> execute original function.
+    auto* slot = reinterpret_cast<volatile uintptr_t*>(base + kCustomSlotOff);
+    *slot = reinterpret_cast<uintptr_t>(&customization_failed_stub);
 
-    uintptr_t vtable_slot_addr = img_base + kHandleCustomizationFailedVtableOff;
-    uintptr_t stub_addr = (uintptr_t)&customization_failed_stub;
-
-    log_line("[CustomPatch] patching vtable slot 0x%lx (offset=0x%llx) -> stub 0x%lx",
-             (unsigned long)vtable_slot_addr,
-             (unsigned long long)kHandleCustomizationFailedVtableOff,
-             (unsigned long)stub_addr);
-
-    if (write_ptr(vtable_slot_addr, stub_addr)) {
-        log_line("[CustomPatch] patch ok - NumLoadCustomizationFailed suppressed");
-    } else {
-        log_line("[CustomPatch] FAIL: write_ptr failed");
-    }
+    log_line("[CustomPatch] armed: slot=0x%lx stub=0x%lx - NumLoadCustomizationFailed suppressed",
+             (unsigned long)(base + kCustomSlotOff),
+             (unsigned long)*slot);
 }
 
 } // namespace fndiag

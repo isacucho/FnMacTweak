@@ -68,6 +68,74 @@ DATA_SLOT_BSS_OFF = 0x12bfa880  # runtime offset only, NOT a file offset
 # new_bytes = old_new_bytes + 1 in imm26 (target moved +4 bytes, same 4KB page)
 BNF_OFFSET = 0x5642c74  # file offset of BnfFn (kBnfOffset in NetFailurePatcher.cpp)
 
+# ---- HandleCustomizationFailed island (V2.6.9) ----
+# execHandleCustomizationFailed at file offset 0xa30b698 (STP X28,X27,[SP,#-0x50]!).
+# Calling via UE4 UFunction dispatch (no direct BL callers in __TEXT).
+# Island placed at 0xb945ba0 (__TEXT.__const zero-padding, 28 bytes after SPEC island).
+# __bss slot at 0x12bfa890 (next 8 bytes after SPEC slot at 0x12bfa888).
+#
+# Island layout (28 bytes):
+#   +0:  ADRP X16, slot_page         (page of __bss slot, same 4KB page as SPEC ADRP)
+#   +4:  LDR  X16, [X16, #0x890]     (dereference: 0=dylib not ready, nonzero=stub addr)
+#   +8:  CBNZ X16, +12               (slot nonzero → call stub at +12; zero → execute_original at +20)
+#   +12: BR   X16                    (tail-call customization_failed_stub, LR intact)
+#   +16: RET                         (unreachable safety)
+#   +20: STP  X28, X27, [SP, #-0x50]! (original insn0 of fn at 0xa30b698)
+#   +24: B    fn+4                   (0x10a30b69c)
+CUSTOM_FN_OFF     = 0xa30b698   # execHandleCustomizationFailed entry
+CUSTOM_ISLAND_OFF = 0xb945ba0   # island in __TEXT.__const zero-padding (after SPEC island)
+CUSTOM_SLOT_OFF   = 0x12bfa890  # __bss DATA slot for customization_failed_stub
+
+CUSTOM_ISLAND_BYTES = bytes.fromhex(
+    'b09503b0'  # ADRP X16, page(0x112BFA000) [same encoding as SPEC; same 4KB page]
+    '104a44f9'  # LDR  X16, [X16, #0x890]  → reads *0x112BFA890 (__bss slot)
+    '700000b5'  # CBNZ X16, +12  (slot==0 → skip BR, go to execute_original at +20)
+    '00021fd6'  # BR   X16  (tail-call customization_failed_stub)
+    'c0035fd6'  # RET  (unreachable safety)
+    'fc6fbba9'  # STP X28,X27,[SP,#-0x50]!  (original insn0 of 0xa30b698)
+    'b916a717'  # B fn+4 (0x10a30b69c)
+)
+CUSTOM_ORIG_INSN = bytes.fromhex('fc6fbba9')  # original first instruction
+CUSTOM_B_INSN    = bytes.fromhex('42e95814')  # B to island (replaces first instruction)
+
+
+def _check_custom_state(data):
+    """Returns 'patched', 'unpatched', or 'unknown' for the CustomizationFailed island."""
+    island_cur = bytes(data[CUSTOM_ISLAND_OFF:CUSTOM_ISLAND_OFF+len(CUSTOM_ISLAND_BYTES)])
+    fn_cur     = bytes(data[CUSTOM_FN_OFF:CUSTOM_FN_OFF+4])
+    if island_cur == CUSTOM_ISLAND_BYTES and fn_cur == CUSTOM_B_INSN:
+        return 'patched'
+    if fn_cur == CUSTOM_ORIG_INSN:
+        return 'unpatched'
+    if fn_cur == CUSTOM_B_INSN and island_cur != CUSTOM_ISLAND_BYTES:
+        return 'repair'
+    return f'unknown (fn={fn_cur.hex()})'
+
+
+def _apply_custom_island(data):
+    """Apply (or skip if already applied) the HandleCustomizationFailed island. Returns True if changed."""
+    state = _check_custom_state(data)
+    if state == 'patched':
+        print("CustomizationFailed island already patched.")
+        return False
+    if state == 'repair':
+        data[CUSTOM_ISLAND_OFF:CUSTOM_ISLAND_OFF+len(CUSTOM_ISLAND_BYTES)] = CUSTOM_ISLAND_BYTES
+        print(f"CustomizationFailed island REPAIRED at 0x{CUSTOM_ISLAND_OFF:x}")
+        return True
+    if state != 'unpatched':
+        print(f"WARNING: CustomizationFailed island state: {state} - skipping.")
+        return False
+    cur_fn = bytes(data[CUSTOM_FN_OFF:CUSTOM_FN_OFF+4])
+    if cur_fn != CUSTOM_ORIG_INSN:
+        print(f"ERROR: CustomizationFailed fn at 0x{CUSTOM_FN_OFF:x} expected {CUSTOM_ORIG_INSN.hex()} got {cur_fn.hex()}. Skipping.")
+        return False
+    data[CUSTOM_ISLAND_OFF:CUSTOM_ISLAND_OFF+len(CUSTOM_ISLAND_BYTES)] = CUSTOM_ISLAND_BYTES
+    print(f"CustomizationFailed island written at 0x{CUSTOM_ISLAND_OFF:x}: {CUSTOM_ISLAND_BYTES.hex()}")
+    data[CUSTOM_FN_OFF:CUSTOM_FN_OFF+4] = CUSTOM_B_INSN
+    print(f"CustomizationFailed fn patched at 0x{CUSTOM_FN_OFF:x}: {CUSTOM_ORIG_INSN.hex()} -> {CUSTOM_B_INSN.hex()}")
+    return True
+
+
 # ---- BeginSpectating island (V2.1.17) ----
 # BeginSpectating_Implementation at file offset 0x81848fc.
 # Non-virtual UE RPC — no vtable entries, so we patch its first instruction in-place
@@ -217,6 +285,13 @@ def verify(data):
     elif spec_state == 'unpatched':
         print(f"  Run with --apply to patch BeginSpectating island.")
 
+    custom_state = _check_custom_state(data)
+    print(f"\nCustomizationFailed island at 0x{CUSTOM_ISLAND_OFF:x}: {custom_state}")
+    if custom_state == 'patched':
+        print(f"  DATA slot 0x{CUSTOM_SLOT_OFF:x}: in __bss (written at runtime by dylib)")
+    elif custom_state == 'unpatched':
+        print(f"  Run with --apply to patch CustomizationFailed island.")
+
     return state
 
 def _apply_spec_island(data):
@@ -253,6 +328,7 @@ def apply_patch(data):
     if state == 'patched':
         print("BNF island already stable (CBZ guard).")
         changed = _apply_spec_island(data)
+        changed |= _apply_custom_island(data)
         return changed
 
     if state == 'patched_old':
@@ -329,6 +405,9 @@ def apply_patch(data):
         print("BeginSpectating island already patched.")
     else:
         print(f"WARNING: BeginSpectating island state: {spec_state} - skipping.")
+
+    # Apply HandleCustomizationFailed island.
+    _apply_custom_island(data)
 
     return True
 
