@@ -474,8 +474,6 @@ extern "C" unsigned char* fndiag_CC_SHA256(const void* data, CC_LONG len, unsign
 
 struct EAC_RxOpts { int32_t ApiVersion; uint32_t DataLengthBytes; const void* Data; };
 
-struct EAC_TxOpts { int32_t ApiVersion; uint32_t DataLengthBytes; const void* Data; };
-
 extern "C" {
     uint64_t EOS_AntiCheatClient_AddNotifyClientIntegrityViolated(
         void* handle, const void* opts, void* cdata, void (*fn)(const void*));
@@ -485,7 +483,6 @@ extern "C" {
     int32_t  EOS_AntiCheatClient_ReceiveMessageFromServer(void* handle, const void* opts);
     int32_t  EOS_AntiCheatClient_EndSession(void* handle, const void* opts);
     int32_t  EOS_AntiCheatClient_BeginSession(void* handle, const void* opts);
-    int32_t  EOS_AntiCheatClient_SendMessageToServer(void* handle, const void* opts);
 }
 
 static void noop_eac_violation(const void*) {}
@@ -545,20 +542,6 @@ int32_t fndiag_begin_session(void* h, const void* opts) {
     return r;
 }
 
-int32_t fndiag_send_msg_to_server(void* h, const void* opts) {
-    static int s_tx = 0;
-    ++s_tx;
-    const EAC_TxOpts* o = static_cast<const EAC_TxOpts*>(opts);
-    uint8_t b0 = 0, b1 = 0;
-    if (o && o->Data && o->DataLengthBytes >= 2) {
-        b0 = static_cast<const uint8_t*>(o->Data)[0];
-        b1 = static_cast<const uint8_t*>(o->Data)[1];
-    }
-    if (s_tx <= 20 || (s_tx % 50) == 0)
-        fndiag::log_line("[EAC-TX] SendMessageToServer #%d len=%u b0=0x%02x b1=0x%02x",
-                         s_tx, o ? o->DataLengthBytes : 0u, b0, b1);
-    return EOS_AntiCheatClient_SendMessageToServer(h, opts);
-}
 }
 
 struct EacInterpose { const void* replacement; const void* original; };
@@ -570,7 +553,6 @@ __attribute__((used, section("__DATA,__interpose"))) static const EacInterpose g
     EAC_INTERPOSE(fndiag_receive_msg_from_server, EOS_AntiCheatClient_ReceiveMessageFromServer),
     EAC_INTERPOSE(fndiag_end_session,             EOS_AntiCheatClient_EndSession),
     EAC_INTERPOSE(fndiag_begin_session,           EOS_AntiCheatClient_BeginSession),
-    EAC_INTERPOSE(fndiag_send_msg_to_server,      EOS_AntiCheatClient_SendMessageToServer),
     EAC_INTERPOSE(fndiag_CC_SHA256,               CC_SHA256),
 };
 
