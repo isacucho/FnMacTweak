@@ -51,11 +51,13 @@ __attribute__((constructor)) static void fncompat_init() {
         BOOT_PROBE("6_validation_done");
 
         // EAC registration hooks:
-        //   - DYLD_INTERPOSE en EOSSDK (BeginSession, ReceiveMessageFromServer, etc.)
-        //   - Supresion de mensajes tipo {5,19,23,49} con indicador=1 (causa del error)
-        //   - Spoof de respuestas verify/match y verify/event
-        //   - Inyeccion de account_id en headers y body
-        //   - EosHooks (GetSystemRequirementStatus -> 0) corre via DYLD_INTERPOSE
+        //   - MSHookFunction en EOSSDK (ReceiveMessageFromServer, BeginSession):
+        //     parchea el prologo de la funcion directamente; unico metodo que funciona
+        //     porque el binario del juego no tiene stubs PLT para EOS_AntiCheatClient_*.
+        //   - Supresion de mensajes tipo {5,19,23,49} con indicador=1 (causa del error
+        //     "Client failed to register with server").
+        //   - Spoof de respuestas verify/match y verify/event (HTTP layer).
+        //   - EosHooks (GetSystemRequirementStatus -> 0) via DYLD_INTERPOSE en EosHooks.cpp.
         installNetHooks();
         fndiag::install_network_hooks();
         BOOT_PROBE("7_nethooks_done");

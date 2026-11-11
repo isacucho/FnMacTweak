@@ -556,6 +556,75 @@ __attribute__((used, section("__DATA,__interpose"))) static const EacInterpose g
     EAC_INTERPOSE(fndiag_CC_SHA256,               CC_SHA256),
 };
 
+// ----------------------------------------------------------------
+// MSHookFunction-based EAC hooks.
+// DYLD_INTERPOSE es inutil para EOS_AntiCheatClient_* porque el binario
+// del juego no tiene stubs PLT para esas funciones (el UE5 plugin usa
+// vtable interna en EOSSDK). MSHookFunction parchea el prologo directamente.
+// ----------------------------------------------------------------
+static int32_t (*g_orig_receive_msg)(void*, const void*) = nullptr;
+static int32_t (*g_orig_begin_session)(void*, const void*) = nullptr;
+
+static int32_t h_msh_receive_msg(void* h, const void* opts) {
+    static int s_msh_count = 0;
+    ++s_msh_count;
+    const EAC_RxOpts* o = static_cast<const EAC_RxOpts*>(opts);
+    uint8_t b0 = 0, b1 = 0;
+    if (o && o->Data && o->DataLengthBytes >= 2) {
+        b0 = static_cast<const uint8_t*>(o->Data)[0];
+        b1 = static_cast<const uint8_t*>(o->Data)[1];
+    }
+    if (b0 == 1) {
+        static const uint8_t kSuppress[] = {5, 19, 23, 49};
+        for (uint8_t t : kSuppress) {
+            if (b1 == t) {
+                fndiag::log_line("[EAC-RX] SUPPRESSED indicator=%d type=%d (len=%u) #%d",
+                                 (int)b0, (int)b1, o ? o->DataLengthBytes : 0u, s_msh_count);
+                return 0;
+            }
+        }
+    }
+    if (s_msh_count <= 20 || (s_msh_count % 50) == 0)
+        fndiag::log_line("[EAC-RX] ReceiveMsg #%d len=%u b0=0x%02x b1=0x%02x",
+                         s_msh_count, o ? o->DataLengthBytes : 0, b0, b1);
+    return g_orig_receive_msg ? g_orig_receive_msg(h, opts) : 0;
+}
+
+static int32_t h_msh_begin_session(void* h, const void* opts) {
+    int32_t r = g_orig_begin_session ? g_orig_begin_session(h, opts) : 0;
+    fndiag::log_line("[EAC-BEGIN] BeginSession result=%d (0=ok)", r);
+    return r;
+}
+
+static void install_eac_mshooks() {
+    MSHookFunction_eac_t mshook = (MSHookFunction_eac_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
+    if (!mshook) {
+        void* h = dlopen("/usr/lib/libsubstrate.dylib", RTLD_NOW);
+        if (!h) h = dlopen("/usr/lib/libellekit.dylib", RTLD_NOW);
+        if (h) mshook = (MSHookFunction_eac_t)dlsym(h, "MSHookFunction");
+    }
+    if (!mshook) {
+        fndiag::log_line("[EAC-HOOK] MSHookFunction no disponible");
+        return;
+    }
+
+    void* sym = dlsym(RTLD_DEFAULT, "_EOS_AntiCheatClient_ReceiveMessageFromServer");
+    if (!sym) sym = dlsym(RTLD_DEFAULT, "EOS_AntiCheatClient_ReceiveMessageFromServer");
+    if (sym) {
+        mshook(sym, (void*)h_msh_receive_msg, (void**)&g_orig_receive_msg);
+        fndiag::log_line("[EAC-HOOK] ReceiveMessageFromServer hooked @ %p", sym);
+    } else {
+        fndiag::log_line("[EAC-HOOK] WARN: ReceiveMessageFromServer no encontrado via dlsym");
+    }
+
+    void* sym2 = dlsym(RTLD_DEFAULT, "_EOS_AntiCheatClient_BeginSession");
+    if (!sym2) sym2 = dlsym(RTLD_DEFAULT, "EOS_AntiCheatClient_BeginSession");
+    if (sym2) {
+        mshook(sym2, (void*)h_msh_begin_session, (void**)&g_orig_begin_session);
+        fndiag::log_line("[EAC-HOOK] BeginSession hooked @ %p", sym2);
+    }
+}
+
 void installNetHooks(void) {
     if (!gVerifyQueue)
         gVerifyQueue = dispatch_queue_create("fnmac.verify", DISPATCH_QUEUE_SERIAL);
@@ -584,4 +653,6 @@ void installNetHooks(void) {
 #ifndef PRODUCTION
     og_installNetHooks();
 #endif
+
+    install_eac_mshooks();
 }
