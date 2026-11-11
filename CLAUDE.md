@@ -44,9 +44,9 @@ file builds/dev/FnMacKickFix-V*.dylib
 - Y: nueva feature (hook nuevo, nuevo subsistema)
 - Z: bugfix / ajuste de comportamiento existente
 
-Proxima: pendiente test en partida con V2.6.8 (EOS state probe, scan UFortRejoinCheck, rejoin en diagnostic mode).
+Proxima: V2.6.9 - CustomizationPatcher framework listo. Pendiente offset kHandleCustomizationFailedOff via lcf_find LLDB (ver include/update/CustomizationPatcher.hpp).
 
-Actual en VERSION: `2.6.8`
+Actual en VERSION: `2.6.9`
 
 ## Log de diagnostico
 

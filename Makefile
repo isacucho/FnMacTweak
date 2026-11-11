@@ -34,6 +34,7 @@ CPP_SRC := \
     src/update/KickPatcher.cpp \
     src/update/NmtPatcher.cpp \
     src/update/NetFailurePatcher.cpp \
+    src/update/CustomizationPatcher.cpp \
     src/input/FpsUnlock.cpp \
     src/input/InputIni.cpp \
     src/input/NativeKbm.cpp \

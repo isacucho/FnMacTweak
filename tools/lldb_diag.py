@@ -224,9 +224,201 @@ def eos_watch(debugger, command, result, internal_dict):
     result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
 
 
+def lcf_find(debugger, command, result, internal_dict):
+    """
+    lcf_find: locate HandleCustomizationFailed at runtime and report its offset
+    from image base.  Copy the printed offset into
+    include/update/CustomizationPatcher.hpp → kHandleCustomizationFailedOff,
+    then rebuild.
+
+    Usage: (lldb) lcf_find
+
+    How it works:
+    1. Scans FortniteClient image memory for the C-string
+       "HandleCustomizationFailed".
+    2. For each occurrence it searches backwards through the preceding 512 KB
+       of __TEXT for ADRP instructions whose resolved page equals the string's
+       4K-aligned VA.  The closest ADRP to the string is in the referencing
+       function.
+    3. From that ADRP walks backwards to find the function prologue (STP X29
+       or SUB SP pattern), giving the function start address.
+    4. Logs "lcf_find: fn_offset=0x<hex>" — that value goes into the header.
+    """
+    import struct, time as _time
+
+    target  = debugger.GetSelectedTarget()
+    process = target.GetProcess()
+    err     = lldb.SBError()
+
+    was_running = (process.GetState() == lldb.eStateRunning)
+    if was_running:
+        process.Stop()
+        for _ in range(30):
+            if process.GetState() != lldb.eStateRunning:
+                break
+            _time.sleep(0.1)
+
+    # --- find image base ---
+    img_base = 0
+    img_size = 0
+    for i in range(target.GetNumModules()):
+        m = target.GetModuleAtIndex(i)
+        name = m.GetFileSpec().GetFilename()
+        if "FortniteClient" in name or i == 0:
+            img_base = m.GetObjectFileHeaderAddress().GetLoadAddress(target)
+            # estimate size from last segment
+            for j in range(m.GetNumSections()):
+                s = m.GetSectionAtIndex(j)
+                end = s.GetLoadAddress(target) + s.GetByteSize()
+                if end > img_base + img_size:
+                    img_size = end - img_base
+            if img_base and img_base != lldb.LLDB_INVALID_ADDRESS:
+                print(f"[lcf_find] img_base=0x{img_base:x}  img_size=0x{img_size:x} ({name})")
+                break
+
+    if not img_base or img_base == lldb.LLDB_INVALID_ADDRESS:
+        print("[lcf_find] FAIL: cannot determine image base")
+        if was_running: process.Continue()
+        return
+
+    TARGET_STR = b"HandleCustomizationFailed\x00"
+
+    # Read the full __TEXT segment in chunks to avoid huge single reads
+    CHUNK = 0x800000  # 8 MB chunks
+    chunk_va = img_base
+    end_va   = img_base + img_size
+
+    string_vas = []
+    print(f"[lcf_find] scanning {img_size // (1024*1024)} MB image for target string ...")
+
+    while chunk_va < end_va and len(string_vas) < 10:
+        read_size = min(CHUNK, end_va - chunk_va)
+        mem = process.ReadMemory(chunk_va, read_size, err)
+        if err.Fail() or not mem:
+            chunk_va += CHUNK
+            continue
+        offset = 0
+        while True:
+            idx = mem.find(TARGET_STR, offset)
+            if idx < 0:
+                break
+            string_vas.append(chunk_va + idx)
+            offset = idx + 1
+        chunk_va += CHUNK
+
+    if not string_vas:
+        print("[lcf_find] string 'HandleCustomizationFailed' not found in image")
+        if was_running: process.Continue()
+        return
+
+    print(f"[lcf_find] found string at {len(string_vas)} location(s): "
+          + ", ".join(f"0x{v:x}" for v in string_vas[:5]))
+
+    fn_addr = 0
+    for str_va in string_vas[:3]:
+        str_page = str_va & ~0xFFF
+        str_pgoff = str_va & 0xFFF  # offset within page (for ADD match)
+
+        # Search backwards from str_va - 4 to str_va - 512KB for ADRP refs
+        search_start = max(img_base, str_va - 0x80000)
+        search_end   = str_va
+
+        # Read the code range
+        code = process.ReadMemory(search_start, search_end - search_start, err)
+        if err.Fail() or not code:
+            continue
+
+        # Walk backwards in 4-byte steps looking for ADRP + ADD pair
+        best_adrp_off = -1
+        for off in range(len(code) - 4, -1, -4):
+            insn, = struct.unpack_from('<I', code, off)
+            pc = search_start + off
+
+            # ADRP: bits[31:24]=1_x0_10000 → (insn & 0x9F000000) == 0x90000000
+            if (insn & 0x9F000000) != 0x90000000:
+                continue
+
+            # Decode ADRP: immhi[23:5], immlo[30:29], Rd[4:0]
+            immlo = (insn >> 29) & 0x3
+            immhi = (insn >> 5) & 0x7FFFF
+            imm21 = (immhi << 2) | immlo
+            # sign extend 21 bits
+            if imm21 & (1 << 20):
+                imm21 |= ~((1 << 21) - 1)
+            pc_page = pc & ~0xFFF
+            resolved_page = (pc_page + (imm21 << 12)) & 0xFFFFFFFFFFFFFFFF
+            if resolved_page != str_page:
+                continue
+
+            # Found ADRP that resolves to our string's page. Check the next
+            # instruction for ADD Xd, Xd, #str_pgoff (or LDRB/LDR with offset).
+            if off + 4 < len(code):
+                next_insn, = struct.unpack_from('<I', code, off + 4)
+                rd = insn & 0x1F
+                # ADD Xd, Xd, #imm12  or  ADD Xd, Xn, #imm12
+                if (next_insn & 0xFF800000) == 0x91000000:
+                    imm12 = (next_insn >> 10) & 0xFFF
+                    rn    = (next_insn >> 5) & 0x1F
+                    if imm12 == str_pgoff:
+                        best_adrp_off = off
+                        break  # exact match - take this one
+            # Accept ADRP alone as a weaker hit; keep searching for a better one
+            if best_adrp_off < 0:
+                best_adrp_off = off
+
+        if best_adrp_off < 0:
+            continue
+
+        adrp_va = search_start + best_adrp_off
+        print(f"[lcf_find] ADRP ref at 0x{adrp_va:x} (offset from base: 0x{adrp_va - img_base:x})")
+
+        # Walk backwards from ADRP to find function prologue: STP X29, X30 or SUB SP
+        # Limit search to 4 KB back (functions are rarely longer without a prolog)
+        prolog_start = max(img_base, adrp_va - 0x1000)
+        code2 = process.ReadMemory(prolog_start, adrp_va - prolog_start, err)
+        if err.Fail() or not code2:
+            fn_addr = adrp_va
+            break
+
+        for off2 in range(len(code2) - 4, -1, -4):
+            insn2, = struct.unpack_from('<I', code2, off2)
+            # STP X29, X30, [SP, #...] = 0xA9BF7BFD & mask or similar
+            # encoding: opc=10 100111 1x xxxxxx xxxxxxx 11111 (SP) xxxxx
+            # STP (pre-indexed): [31:30]=10 [29:27]=101 [26]=0 [25:24]=11 [23]=1 [22]=1
+            # simplified: (insn & 0xFFC07FFF) == 0xA9007BFD checks for STP X29,X30,[SP]
+            if (insn2 & 0xFFC07FFF) == 0xA9007BFD:  # STP X29, X30
+                fn_addr = prolog_start + off2
+                break
+            # SUB SP, SP, #imm: (insn & 0xFFFFFC1F) == 0xD10003FF
+            if (insn2 & 0xFFFFFC1F) == 0xD10003FF:
+                fn_addr = prolog_start + off2
+                break
+
+        if fn_addr:
+            break
+
+    if not fn_addr:
+        print("[lcf_find] could not locate function prologue")
+        if was_running: process.Continue()
+        return
+
+    fn_offset = fn_addr - img_base
+    print(f"\n[lcf_find] *** HandleCustomizationFailed ***")
+    print(f"[lcf_find]   fn_addr   = 0x{fn_addr:x}")
+    print(f"[lcf_find]   fn_offset = 0x{fn_offset:x}  ← put this in kHandleCustomizationFailedOff")
+    print(f"[lcf_find]   img_base  = 0x{img_base:x}")
+    print(f"\n[lcf_find] Edit include/update/CustomizationPatcher.hpp:")
+    print(f"[lcf_find]   static constexpr uint64_t kHandleCustomizationFailedOff = 0x{fn_offset:x}ULL;")
+
+    if was_running: process.Continue()
+    result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
+
+
 def __lldb_init_module(debugger, internal_dict):
     debugger.HandleCommand(
         'command script add -f lldb_diag.diag_start diag_start')
     debugger.HandleCommand(
         'command script add -f lldb_diag.eos_watch eos_watch')
-    print("[lldb_diag] Loaded. Commands: 'diag_start' | 'eos_watch'")
+    debugger.HandleCommand(
+        'command script add -f lldb_diag.lcf_find lcf_find')
+    print("[lldb_diag] Loaded. Commands: 'diag_start' | 'eos_watch' | 'lcf_find'")
