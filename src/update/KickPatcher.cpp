@@ -21,6 +21,13 @@ std::atomic<bool>     g_rejoin_attempted{false};
 //   at ~40s (prior kick). Vtable bypass is the safe path: we only redirect vtable dispatch.
 static constexpr uintptr_t kKickedFnOffset   = 0x858cf18ULL;
 
+// EOS session state: STATIC GLOBAL in the binary, not a heap pointer chain.
+// Discovered via disassembly of the check fn called from RejoinViaSessionInternal:
+//   adrp x8, 66454; ldrb w8, [x8, #0xd68]; cmp w8, #0x5
+// → state_byte = *(img_base + 0x13072d68)
+// Values: 4=InProgress 5=Ending 6=Ended. Rejoin requires state < 5.
+static constexpr uintptr_t kEosStateGlobalOff = 0x13072d68ULL;
+
 // RejoinViaSessionInternal: vtable entry in __DATA_CONST,__const.
 // At runtime dyld resolves to IMAGE_BASE + kRejoinFnOff.
 // Intercepting allows forcing bCanRejoinSession=true (guard at fn+0x2c).
@@ -185,49 +192,17 @@ static void kick_bypass_stub(void* self, int32_t reason) {
             // Setting it here (before the EOS probe) caused the synthetic CT to be skipped even
             // when the probe failed (kr=1), resulting in a 90s freeze instead of 25s.
             // Probe EOS session state before calling RejoinViaSessionInternal.
-            // Chain: ADRP(file+0xc25a000) + LDR[+0x468] + LDR[+0] + LDRB[+0xd68]
+            // State is a STATIC GLOBAL at g_image_base + kEosStateGlobalOff (not a heap chain).
             // State must be < 5 (InProgress); >= 5 (Ending/Ended) triggers checkf -> RequestExit.
-            // Use vm_read_overwrite to avoid crashing if the EOS object was freed after the kick.
             bool eos_state_ok = false;
             if (g_image_base) {
-                // Step 1: read slot1 from __DATA_CONST (always valid, dyld-fixed).
-                uintptr_t slot1 = 0;
-                vm_size_t nr = 0;
-                kern_return_t kr = vm_read_overwrite(mach_task_self(),
-                    g_image_base + 0xc25a000 + 0x468,
-                    sizeof(uintptr_t),
-                    reinterpret_cast<vm_address_t>(&slot1), &nr);
-                if (kr != KERN_SUCCESS || slot1 == 0) {
-                    log_line("[Reconnect] EOS probe: slot1 read failed kr=%d val=0x%lx", kr, (long)slot1);
+                auto* state_ptr = reinterpret_cast<volatile uint8_t*>(g_image_base + kEosStateGlobalOff);
+                uint8_t eos_state = *state_ptr;
+                log_line("[Reconnect] EOS session state=%d (must be <5 for rejoin)", (int)eos_state);
+                if (eos_state < 5) {
+                    eos_state_ok = true;
                 } else {
-                    // Step 2: read slot2 = *(slot1) safely.
-                    uintptr_t slot2 = 0;
-                    nr = 0;
-                    kr = vm_read_overwrite(mach_task_self(),
-                        slot1,
-                        sizeof(uintptr_t),
-                        reinterpret_cast<vm_address_t>(&slot2), &nr);
-                    if (kr != KERN_SUCCESS || slot2 == 0) {
-                        log_line("[Reconnect] EOS probe: slot2 read failed kr=%d val=0x%lx", kr, (long)slot2);
-                    } else {
-                        // Step 3: read state byte at slot2+0xd68.
-                        uint8_t eos_state = 0xFF;
-                        nr = 0;
-                        kr = vm_read_overwrite(mach_task_self(),
-                            slot2 + 0xd68,
-                            sizeof(uint8_t),
-                            reinterpret_cast<vm_address_t>(&eos_state), &nr);
-                        if (kr != KERN_SUCCESS) {
-                            log_line("[Reconnect] EOS probe: state read failed kr=%d", kr);
-                        } else {
-                            log_line("[Reconnect] EOS session state=%d (must be <5 for rejoin)", (int)eos_state);
-                            if (eos_state < 5) {
-                                eos_state_ok = true;
-                            } else {
-                                log_line("[Reconnect] EOS state >= 5 - rejoin blocked to avoid RequestExit");
-                            }
-                        }
-                    }
+                    log_line("[Reconnect] EOS state >= 5 - rejoin blocked to avoid RequestExit");
                 }
             }
             if (eos_state_ok) {
