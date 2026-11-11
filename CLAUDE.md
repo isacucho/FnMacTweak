@@ -40,13 +40,18 @@ file builds/dev/FnMacKickFix-V*.dylib
 
 ## Versionado (X.Y.Z)
 
-- X: cambio breaking (reestructura de hooks, ABI roto)
-- Y: nueva feature (hook nuevo, nuevo subsistema)
-- Z: bugfix / ajuste de comportamiento existente
+Esquema alineado con la version oficial de Fortnite iOS:
 
-Proxima: V2.6.9 - CustomizationPatcher framework listo. Pendiente offset kHandleCustomizationFailedOff via lcf_find LLDB (ver include/update/CustomizationPatcher.hpp).
+- X: major de la version oficial de Fortnite iOS (ej. 23 para Fortnite 23.0.0)
+  Cambia cuando se actualiza el target de Fortnite (nueva IPA base).
+- Y: nueva feature en la dylib (hook nuevo, nuevo subsistema, nuevo modulo)
+  Acumulado desde la IPA base 42.40.1.
+- Z: bugfix / ajuste de comportamiento existente en la dylib
 
-Actual en VERSION: `2.6.9`
+IPA: `Fortnite-[X].0.0-V[X].[Y].[Z]-min.ipa`
+Dylib: `FnMacKickFix-V[X].[Y].[Z].dylib`
+
+Actual en VERSION: `23.6.9`  (Fortnite 23.0.0, 6 features, 9 patches desde 42.40.1)
 
 ## Log de diagnostico
 
