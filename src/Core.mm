@@ -4,9 +4,15 @@
 
 #include "core/DiagLog.hpp"
 #include "core/SimulatorContext.hpp"
+#include "core/OsLogInterceptor.hpp"
 #include "update/KickPatcher.hpp"
 #include "network/EacHooks.hpp"
 #include "update/UpdateHooks.hpp"
+#include "metadata/DeviceSpoof.hpp"
+
+// Resto de modulos: compilados pero no llamados desde el constructor.
+// Sirven como backup activo; reintroducirlos no requiere reconstruir el dylib.
+// (KickBypass, NmtPatcher, CustomizationPatcher, NetFailurePatcher, etc.)
 
 #ifndef MODULE_VERSION
 #define MODULE_VERSION "1.0.0"
@@ -24,17 +30,34 @@ __attribute__((constructor)) static void fncompat_init() {
         std::string container = home ? home : [NSHomeDirectory() UTF8String];
 
         iOSSimulatorContext::getInstance().emulateiOSDirectories(container);
-        BOOT_PROBE("2_simulator_ctx_done");
+        BOOT_PROBE("2_sim_done");
         fndiag::log_init(container + "/Documents/FnDiag.log");
         BOOT_PROBE("3_log_init_done");
 
-        fndiag::install_validation_patch();
-        BOOT_PROBE("4_validation_patch_done");
+        // Interceptor de os_log y NSLog: captura mensajes del juego con campos
+        // <private> antes del filtro del sistema. Ver OsLogInterceptor.hpp.
+        fndiag::install_oslog_interceptor();
+        BOOT_PROBE("4_oslog_done");
 
-        // EAC registration fix: account_id injection en verify/event + observador NSURLSession.
-        // EosHooks (GetSystemRequirementStatus -> 0) corre automaticamente via DYLD_INTERPOSE.
+        // DeviceSpoof: fingerprint iPad14,3 / iOS 17.5 + parche isiOSAppOnMac en EOSSDK.
+        // Debe instalarse antes de cualquier llamada al EOSSDK.
+        installSpoofHooks();
+        BOOT_PROBE("5_spoof_done");
+
+        // Validation patch: reemplaza vtable 0xcd32e18 y 0xcd32df8 con un stub
+        // que siempre pasa, evitando el kick por performance counters (reasons 10/6).
+        // Solo toca __DATA_CONST; EAC no hashea esta seccion.
+        fndiag::install_validation_patch();
+        BOOT_PROBE("6_validation_done");
+
+        // EAC registration hooks:
+        //   - DYLD_INTERPOSE en EOSSDK (BeginSession, ReceiveMessageFromServer, etc.)
+        //   - Supresion de mensajes tipo {5,19,23,49} con indicador=1 (causa del error)
+        //   - Spoof de respuestas verify/match y verify/event
+        //   - Inyeccion de account_id en headers y body
+        //   - EosHooks (GetSystemRequirementStatus -> 0) corre via DYLD_INTERPOSE
         installNetHooks();
         fndiag::install_network_hooks();
-        BOOT_PROBE("5_network_hooks_done");
+        BOOT_PROBE("7_nethooks_done");
     }
 }

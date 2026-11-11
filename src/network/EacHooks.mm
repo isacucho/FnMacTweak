@@ -474,6 +474,8 @@ extern "C" unsigned char* fndiag_CC_SHA256(const void* data, CC_LONG len, unsign
 
 struct EAC_RxOpts { int32_t ApiVersion; uint32_t DataLengthBytes; const void* Data; };
 
+struct EAC_TxOpts { int32_t ApiVersion; uint32_t DataLengthBytes; const void* Data; };
+
 extern "C" {
     uint64_t EOS_AntiCheatClient_AddNotifyClientIntegrityViolated(
         void* handle, const void* opts, void* cdata, void (*fn)(const void*));
@@ -482,6 +484,8 @@ extern "C" {
     int32_t  EOS_AntiCheatClient_PollStatus(void* handle, const void* opts, void* out_info);
     int32_t  EOS_AntiCheatClient_ReceiveMessageFromServer(void* handle, const void* opts);
     int32_t  EOS_AntiCheatClient_EndSession(void* handle, const void* opts);
+    int32_t  EOS_AntiCheatClient_BeginSession(void* handle, const void* opts);
+    int32_t  EOS_AntiCheatClient_SendMessageToServer(void* handle, const void* opts);
 }
 
 static void noop_eac_violation(const void*) {}
@@ -507,8 +511,23 @@ int32_t fndiag_receive_msg_from_server(void* h, const void* opts) {
         b0 = static_cast<const uint8_t*>(o->Data)[0];
         b1 = static_cast<const uint8_t*>(o->Data)[1];
     }
-    if (s_count <= 10 || (s_count % 50) == 0)
-        fndiag::log_line("[EAC-RX] ReceiveMessageFromServer #%d len=%u type=0x%02x%02x",
+
+    // Sugerencia del companero: suprimir los tipos de informe 5, 19, 23, 49
+    // cuando el indicador (b0) == 1. Estos mensajes EAC triggean el error
+    // "Client failed to register with server" (errors.com.epicgames.common.processing).
+    if (b0 == 1) {
+        static const uint8_t kSuppressTypes[] = {5, 19, 23, 49};
+        for (uint8_t t : kSuppressTypes) {
+            if (b1 == t) {
+                fndiag::log_line("[EAC-RX] SUPPRESSED indicator=%d type=%d (len=%u) #%d",
+                                 (int)b0, (int)b1, o ? o->DataLengthBytes : 0u, s_count);
+                return 0;
+            }
+        }
+    }
+
+    if (s_count <= 20 || (s_count % 50) == 0)
+        fndiag::log_line("[EAC-RX] ReceiveMessageFromServer #%d len=%u b0=0x%02x b1=0x%02x",
                          s_count, o ? o->DataLengthBytes : 0, b0, b1);
     return EOS_AntiCheatClient_ReceiveMessageFromServer(h, opts);
 }
@@ -517,6 +536,28 @@ int32_t fndiag_end_session(void* /*h*/, const void* /*opts*/) {
     ++s_es;
     fndiag::log_line("[EAC-ENDSESSION] EndSession call #%d SUPPRESSED", s_es);
     return 0;
+}
+
+int32_t fndiag_begin_session(void* h, const void* opts) {
+    // Loguear y reenviar. Si devuelve != 0, el SDK no se ha registrado.
+    int32_t r = EOS_AntiCheatClient_BeginSession(h, opts);
+    fndiag::log_line("[EAC-BEGIN] BeginSession result=%d (0=ok)", r);
+    return r;
+}
+
+int32_t fndiag_send_msg_to_server(void* h, const void* opts) {
+    static int s_tx = 0;
+    ++s_tx;
+    const EAC_TxOpts* o = static_cast<const EAC_TxOpts*>(opts);
+    uint8_t b0 = 0, b1 = 0;
+    if (o && o->Data && o->DataLengthBytes >= 2) {
+        b0 = static_cast<const uint8_t*>(o->Data)[0];
+        b1 = static_cast<const uint8_t*>(o->Data)[1];
+    }
+    if (s_tx <= 20 || (s_tx % 50) == 0)
+        fndiag::log_line("[EAC-TX] SendMessageToServer #%d len=%u b0=0x%02x b1=0x%02x",
+                         s_tx, o ? o->DataLengthBytes : 0u, b0, b1);
+    return EOS_AntiCheatClient_SendMessageToServer(h, opts);
 }
 }
 
@@ -528,6 +569,8 @@ __attribute__((used, section("__DATA,__interpose"))) static const EacInterpose g
     EAC_INTERPOSE(fndiag_poll_status,             EOS_AntiCheatClient_PollStatus),
     EAC_INTERPOSE(fndiag_receive_msg_from_server, EOS_AntiCheatClient_ReceiveMessageFromServer),
     EAC_INTERPOSE(fndiag_end_session,             EOS_AntiCheatClient_EndSession),
+    EAC_INTERPOSE(fndiag_begin_session,           EOS_AntiCheatClient_BeginSession),
+    EAC_INTERPOSE(fndiag_send_msg_to_server,      EOS_AntiCheatClient_SendMessageToServer),
     EAC_INTERPOSE(fndiag_CC_SHA256,               CC_SHA256),
 };
 

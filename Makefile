@@ -43,6 +43,7 @@ CPP_SRC := \
 # Fuentes ObjC++ (compilados con -fobjc-arc)
 MM_SRC := \
     src/Core.mm \
+    src/core/OsLogInterceptor.mm \
     src/metadata/DeviceSpoof.mm \
     src/network/EacHooks.mm \
     src/update/EngineHooks.mm \
