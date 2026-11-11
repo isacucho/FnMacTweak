@@ -59,8 +59,7 @@ void install_customization_patch() {
     for (uint32_t i = 0; i < _dyld_image_count(); ++i) {
         const char* name = _dyld_get_image_name(i);
         if (name && (strstr(name, "FortniteClient") || i == 0)) {
-            img_base = (uintptr_t)_dyld_get_image_header(i)
-                       + _dyld_get_image_vmaddr_slide(i);
+            img_base = (uintptr_t)_dyld_get_image_header(i);
             if (img_base) break;
         }
     }
