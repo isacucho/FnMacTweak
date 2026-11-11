@@ -17,7 +17,7 @@ namespace fndiag {
 //   (lldb) lcf_find
 // The command logs "lcf_find: fn_offset=0x<hex>" to stdout - copy that value here.
 
-static constexpr uint64_t kHandleCustomizationFailedOff = 0x0ULL;  // FILL IN
+static constexpr uint64_t kHandleCustomizationFailedOff = 0xa30b6f4ULL;
 
 void install_customization_patch();
 

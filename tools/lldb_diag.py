@@ -233,16 +233,11 @@ def lcf_find(debugger, command, result, internal_dict):
 
     Usage: (lldb) lcf_find
 
-    How it works:
-    1. Scans FortniteClient image memory for the C-string
-       "HandleCustomizationFailed".
-    2. For each occurrence it searches backwards through the preceding 512 KB
-       of __TEXT for ADRP instructions whose resolved page equals the string's
-       4K-aligned VA.  The closest ADRP to the string is in the referencing
-       function.
-    3. From that ADRP walks backwards to find the function prologue (STP X29
-       or SUB SP pattern), giving the function start address.
-    4. Logs "lcf_find: fn_offset=0x<hex>" — that value goes into the header.
+    Two-pass scan:
+    1. Full image scan for the C-string "HandleCustomizationFailed".
+    2. Full __TEXT scan for ADRP instructions whose resolved page == string page.
+       Checks ADD Xd, Xd, #pgoff on the next instruction for exact hits.
+    3. Walks backwards from each ADRP to find the function prologue.
     """
     import struct, time as _time
 
@@ -258,22 +253,15 @@ def lcf_find(debugger, command, result, internal_dict):
                 break
             _time.sleep(0.1)
 
-    # --- find image base ---
+    # --- image base ---
     img_base = 0
-    img_size = 0
     for i in range(target.GetNumModules()):
         m = target.GetModuleAtIndex(i)
         name = m.GetFileSpec().GetFilename()
         if "FortniteClient" in name or i == 0:
             img_base = m.GetObjectFileHeaderAddress().GetLoadAddress(target)
-            # estimate size from last segment
-            for j in range(m.GetNumSections()):
-                s = m.GetSectionAtIndex(j)
-                end = s.GetLoadAddress(target) + s.GetByteSize()
-                if end > img_base + img_size:
-                    img_size = end - img_base
             if img_base and img_base != lldb.LLDB_INVALID_ADDRESS:
-                print(f"[lcf_find] img_base=0x{img_base:x}  img_size=0x{img_size:x} ({name})")
+                print(f"[lcf_find] img_base=0x{img_base:x} ({name})")
                 break
 
     if not img_base or img_base == lldb.LLDB_INVALID_ADDRESS:
@@ -281,133 +269,128 @@ def lcf_find(debugger, command, result, internal_dict):
         if was_running: process.Continue()
         return
 
+    # Fixed layout offsets from base 0x100000000 (otool):
+    #   __text start offset = 0x4000, end = 0xC70D06C
+    #   __TEXT total vmsize = 0xDD80000
+    IMG_SIZE   = 0xDD80000   # scan range for string
+    CODE_END   = 0xC70D06C   # __text section end (from img_base)
+
     TARGET_STR = b"HandleCustomizationFailed\x00"
+    CHUNK      = 0x800000    # 8 MB chunks
 
-    # Read the full __TEXT segment in chunks to avoid huge single reads
-    CHUNK = 0x800000  # 8 MB chunks
-    chunk_va = img_base
-    end_va   = img_base + img_size
-
+    # --- pass 1: find string VA ---
     string_vas = []
-    print(f"[lcf_find] scanning {img_size // (1024*1024)} MB image for target string ...")
-
-    while chunk_va < end_va and len(string_vas) < 10:
+    print(f"[lcf_find] pass 1: scanning {IMG_SIZE//(1024*1024)} MB for string ...")
+    chunk_va = img_base
+    end_va   = img_base + IMG_SIZE
+    while chunk_va < end_va and len(string_vas) < 5:
         read_size = min(CHUNK, end_va - chunk_va)
+        mem = process.ReadMemory(chunk_va, read_size, err)
+        if not err.Fail() and mem:
+            pos = 0
+            while True:
+                idx = mem.find(TARGET_STR, pos)
+                if idx < 0: break
+                string_vas.append(chunk_va + idx)
+                pos = idx + 1
+        chunk_va += CHUNK
+
+    if not string_vas:
+        print("[lcf_find] FAIL: string not found in image")
+        if was_running: process.Continue()
+        return
+
+    str_va    = string_vas[0]
+    str_page  = str_va & ~0xFFF
+    str_pgoff = str_va & 0xFFF
+    print(f"[lcf_find] string VA=0x{str_va:x}  page=0x{str_page:x}  pgoff=0x{str_pgoff:x}")
+
+    # --- pass 2: scan __TEXT for ADRP refs to str_page ---
+    # ADRP Xd, label: (insn & 0x9F000000) == 0x90000000
+    # resolved = (PC & ~0xFFF) + sign_extend(immhi:immlo, 21) << 12
+    # We want resolved == str_page.
+    adrp_exact  = []   # (va, rd) where ADRP+ADD matches exactly
+    adrp_partial= []   # (va, rd) where only ADRP matches
+
+    print(f"[lcf_find] pass 2: scanning __TEXT (0x{CODE_END//1024//1024} MB) for ADRP refs ...")
+    code_end_va = img_base + CODE_END
+    chunk_va = img_base
+    while chunk_va < code_end_va:
+        read_size = min(CHUNK, code_end_va - chunk_va)
+        if read_size < 4: break
         mem = process.ReadMemory(chunk_va, read_size, err)
         if err.Fail() or not mem:
             chunk_va += CHUNK
             continue
-        offset = 0
-        while True:
-            idx = mem.find(TARGET_STR, offset)
-            if idx < 0:
-                break
-            string_vas.append(chunk_va + idx)
-            offset = idx + 1
+        for off in range(0, len(mem) - 4, 4):
+            insn, = struct.unpack_from('<I', mem, off)
+            if (insn & 0x9F000000) != 0x90000000:
+                continue
+            pc      = chunk_va + off
+            pc_page = pc & ~0xFFF
+            immlo   = (insn >> 29) & 0x3
+            immhi   = (insn >> 5)  & 0x7FFFF
+            imm21   = (immhi << 2) | immlo
+            if imm21 & (1 << 20):
+                imm21 -= (1 << 21)
+            resolved = (pc_page + (imm21 << 12)) & 0xFFFFFFFFFFFFFFFF
+            if resolved != str_page:
+                continue
+            rd = insn & 0x1F
+            # check ADD Xd, Xd/Xn, #str_pgoff
+            if off + 4 < len(mem):
+                nxt, = struct.unpack_from('<I', mem, off + 4)
+                if (nxt & 0xFF800000) == 0x91000000:
+                    if ((nxt >> 10) & 0xFFF) == str_pgoff:
+                        adrp_exact.append((pc, rd))
+                        continue
+            adrp_partial.append((pc, rd))
         chunk_va += CHUNK
 
-    if not string_vas:
-        print("[lcf_find] string 'HandleCustomizationFailed' not found in image")
+    print(f"[lcf_find] ADRP refs: {len(adrp_exact)} exact (ADRP+ADD)  {len(adrp_partial)} partial")
+    candidates = adrp_exact if adrp_exact else adrp_partial
+    if not candidates:
+        print("[lcf_find] FAIL: no ADRP references found — string may be unreferenced via ADRP")
         if was_running: process.Continue()
         return
 
-    print(f"[lcf_find] found string at {len(string_vas)} location(s): "
-          + ", ".join(f"0x{v:x}" for v in string_vas[:5]))
-
+    # --- pass 3: find function prologue for each candidate ---
     fn_addr = 0
-    for str_va in string_vas[:3]:
-        str_page = str_va & ~0xFFF
-        str_pgoff = str_va & 0xFFF  # offset within page (for ADD match)
-
-        # Search backwards from str_va - 4 to str_va - 512KB for ADRP refs
-        search_start = max(img_base, str_va - 0x80000)
-        search_end   = str_va
-
-        # Read the code range
-        code = process.ReadMemory(search_start, search_end - search_start, err)
-        if err.Fail() or not code:
-            continue
-
-        # Walk backwards in 4-byte steps looking for ADRP + ADD pair
-        best_adrp_off = -1
-        for off in range(len(code) - 4, -1, -4):
-            insn, = struct.unpack_from('<I', code, off)
-            pc = search_start + off
-
-            # ADRP: bits[31:24]=1_x0_10000 → (insn & 0x9F000000) == 0x90000000
-            if (insn & 0x9F000000) != 0x90000000:
-                continue
-
-            # Decode ADRP: immhi[23:5], immlo[30:29], Rd[4:0]
-            immlo = (insn >> 29) & 0x3
-            immhi = (insn >> 5) & 0x7FFFF
-            imm21 = (immhi << 2) | immlo
-            # sign extend 21 bits
-            if imm21 & (1 << 20):
-                imm21 |= ~((1 << 21) - 1)
-            pc_page = pc & ~0xFFF
-            resolved_page = (pc_page + (imm21 << 12)) & 0xFFFFFFFFFFFFFFFF
-            if resolved_page != str_page:
-                continue
-
-            # Found ADRP that resolves to our string's page. Check the next
-            # instruction for ADD Xd, Xd, #str_pgoff (or LDRB/LDR with offset).
-            if off + 4 < len(code):
-                next_insn, = struct.unpack_from('<I', code, off + 4)
-                rd = insn & 0x1F
-                # ADD Xd, Xd, #imm12  or  ADD Xd, Xn, #imm12
-                if (next_insn & 0xFF800000) == 0x91000000:
-                    imm12 = (next_insn >> 10) & 0xFFF
-                    rn    = (next_insn >> 5) & 0x1F
-                    if imm12 == str_pgoff:
-                        best_adrp_off = off
-                        break  # exact match - take this one
-            # Accept ADRP alone as a weaker hit; keep searching for a better one
-            if best_adrp_off < 0:
-                best_adrp_off = off
-
-        if best_adrp_off < 0:
-            continue
-
-        adrp_va = search_start + best_adrp_off
-        print(f"[lcf_find] ADRP ref at 0x{adrp_va:x} (offset from base: 0x{adrp_va - img_base:x})")
-
-        # Walk backwards from ADRP to find function prologue: STP X29, X30 or SUB SP
-        # Limit search to 4 KB back (functions are rarely longer without a prolog)
-        prolog_start = max(img_base, adrp_va - 0x1000)
-        code2 = process.ReadMemory(prolog_start, adrp_va - prolog_start, err)
+    for adrp_va, rd in candidates[:10]:
+        # Walk backwards up to 8 KB looking for prologue
+        back = min(adrp_va - img_base, 0x2000)
+        code2 = process.ReadMemory(adrp_va - back, back, err)
         if err.Fail() or not code2:
-            fn_addr = adrp_va
-            break
-
+            continue
         for off2 in range(len(code2) - 4, -1, -4):
             insn2, = struct.unpack_from('<I', code2, off2)
-            # STP X29, X30, [SP, #...] = 0xA9BF7BFD & mask or similar
-            # encoding: opc=10 100111 1x xxxxxx xxxxxxx 11111 (SP) xxxxx
-            # STP (pre-indexed): [31:30]=10 [29:27]=101 [26]=0 [25:24]=11 [23]=1 [22]=1
-            # simplified: (insn & 0xFFC07FFF) == 0xA9007BFD checks for STP X29,X30,[SP]
-            if (insn2 & 0xFFC07FFF) == 0xA9007BFD:  # STP X29, X30
-                fn_addr = prolog_start + off2
+            # STP X29, X30, [SP, #imm]  (any form: pre-index, signed-offset, etc.)
+            # Fixed bytes: byte3=0xA9, bytes[1:0]=0x7BFD
+            # mask: 0xFF00FFFF  value: 0xA9007BFD
+            if (insn2 & 0xFF00FFFF) == 0xA9007BFD:
+                fn_addr = adrp_va - back + off2
                 break
-            # SUB SP, SP, #imm: (insn & 0xFFFFFC1F) == 0xD10003FF
-            if (insn2 & 0xFFFFFC1F) == 0xD10003FF:
-                fn_addr = prolog_start + off2
+            # SUB SP, SP, #imm12  (alternative frame setup)
+            # Fixed bits: byte3=0xD1, bits[9:0]=0x3FF (Rn=SP Rd=SP)
+            # mask: 0xFF0003FF  value: 0xD10003FF
+            if (insn2 & 0xFF0003FF) == 0xD10003FF:
+                fn_addr = adrp_va - back + off2
                 break
-
         if fn_addr:
+            print(f"[lcf_find] prologue found at 0x{fn_addr:x} (ADRP was at 0x{adrp_va:x})")
             break
 
     if not fn_addr:
-        print("[lcf_find] could not locate function prologue")
-        if was_running: process.Continue()
-        return
+        # Fallback: use first candidate ADRP address
+        fn_addr = candidates[0][0]
+        print(f"[lcf_find] WARN: prologue not found; using ADRP addr 0x{fn_addr:x} as approximation")
 
     fn_offset = fn_addr - img_base
     print(f"\n[lcf_find] *** HandleCustomizationFailed ***")
     print(f"[lcf_find]   fn_addr   = 0x{fn_addr:x}")
-    print(f"[lcf_find]   fn_offset = 0x{fn_offset:x}  ← put this in kHandleCustomizationFailedOff")
+    print(f"[lcf_find]   fn_offset = 0x{fn_offset:x}  <-- copy this value")
     print(f"[lcf_find]   img_base  = 0x{img_base:x}")
-    print(f"\n[lcf_find] Edit include/update/CustomizationPatcher.hpp:")
+    print(f"\n[lcf_find] In include/update/CustomizationPatcher.hpp:")
     print(f"[lcf_find]   static constexpr uint64_t kHandleCustomizationFailedOff = 0x{fn_offset:x}ULL;")
 
     if was_running: process.Continue()
