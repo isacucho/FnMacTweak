@@ -44,9 +44,9 @@ file builds/dev/FnMacKickFix-V*.dylib
 - Y: nueva feature (hook nuevo, nuevo subsistema)
 - Z: bugfix / ajuste de comportamiento existente
 
-Proxima: pendiente test en partida de lobby return en 25s (V2.1.27).
+Proxima: pendiente test en partida con V2.6.8 (EOS state probe, scan UFortRejoinCheck, rejoin en diagnostic mode).
 
-Actual en VERSION: `2.6.6`
+Actual en VERSION: `2.6.8`
 
 ## Log de diagnostico
 

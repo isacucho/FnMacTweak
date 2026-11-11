@@ -49,33 +49,6 @@ typedef struct {
     int32_t MaxMessageCount;
 } EOS_AntiCheatClient_PollStatusOptions;
 
-/* EOS_Sessions_StartSession options (ApiVersion 1) */
-typedef struct {
-    int32_t     ApiVersion;
-    const char* SessionName;
-} EOS_Sessions_StartSessionOptions;
-
-typedef struct {
-    EOS_EResult ResultCode;
-    void*       ClientData;
-    const char* SessionName;
-} EOS_Sessions_StartSessionCallbackInfo;
-typedef void (*EOS_Sessions_OnStartSessionCallback)(const EOS_Sessions_StartSessionCallbackInfo* Data);
-
-/* EOS_Sessions_JoinSession options (ApiVersion 1 simplified) */
-typedef struct {
-    int32_t     ApiVersion;
-    const char* SessionName;
-    /* remaining fields opaque - we only read SessionName */
-} EOS_Sessions_JoinSessionOptions;
-
-typedef struct {
-    EOS_EResult ResultCode;
-    void*       ClientData;
-    const char* SessionName;
-} EOS_Sessions_JoinSessionCallbackInfo;
-typedef void (*EOS_Sessions_OnJoinSessionCallback)(const EOS_Sessions_JoinSessionCallbackInfo* Data);
-
 /* EOS_Sessions_EndSession options (ApiVersion 1) */
 typedef struct {
     int32_t     ApiVersion;
@@ -93,18 +66,6 @@ typedef void (*EOS_Sessions_OnDestroySessionCallback)(const void* Data);
 /* Declared extern "C" so the linker resolves them from EOSSDK.framework at
    runtime; -Wl,-undefined,dynamic_lookup keeps the build happy. */
 extern "C" {
-EOS_EResult EOS_Sessions_StartSession(
-    EOS_HSessions Handle,
-    const EOS_Sessions_StartSessionOptions* Options,
-    void* ClientData,
-    EOS_Sessions_OnStartSessionCallback CompletionDelegate);
-
-EOS_EResult EOS_Sessions_JoinSession(
-    EOS_HSessions Handle,
-    const EOS_Sessions_JoinSessionOptions* Options,
-    void* ClientData,
-    EOS_Sessions_OnJoinSessionCallback CompletionDelegate);
-
 EOS_EResult EOS_AntiCheatClient_BeginSession(
     EOS_HAntiCheatClient Handle,
     const EOS_AntiCheatClient_BeginSessionOptions* Options);
@@ -190,90 +151,6 @@ static EOS_EResult my_PollStatus(
     return r;
 }
 
-/* --- EOS Sessions lifecycle hooks ---
- * Goal: determine if StartSession/JoinSession are called and what they return.
- * EOS state=3 (Starting) at kick time means the client never transitioned to
- * InProgress(4). These hooks reveal whether the calls happen and succeed.
- */
-
-struct StartCbCtx {
-    EOS_Sessions_OnStartSessionCallback orig_cb;
-    void* orig_data;
-    char  name[128];
-};
-
-static void on_start_session_cb(const EOS_Sessions_StartSessionCallbackInfo* Data) {
-    if (!Data) return;
-    auto* ctx = reinterpret_cast<StartCbCtx*>(Data->ClientData);
-    fndiag::log_line("[EOS] StartSession '%s' result=%d (0=ok)", ctx->name, (int)Data->ResultCode);
-    if (ctx->orig_cb) {
-        EOS_Sessions_StartSessionCallbackInfo d = *Data;
-        d.ClientData = ctx->orig_data;
-        ctx->orig_cb(&d);
-    }
-    delete ctx;
-}
-
-static EOS_EResult my_StartSession(
-    EOS_HSessions Handle,
-    const EOS_Sessions_StartSessionOptions* Options,
-    void* ClientData,
-    EOS_Sessions_OnStartSessionCallback CompletionDelegate)
-{
-    const char* n = (Options && Options->SessionName) ? Options->SessionName : "(null)";
-    fndiag::log_line("[EOS] StartSession '%s' called ApiVer=%d", n, Options ? Options->ApiVersion : -1);
-    auto* ctx = new StartCbCtx();
-    ctx->orig_cb   = CompletionDelegate;
-    ctx->orig_data = ClientData;
-    __builtin_strncpy(ctx->name, n, sizeof(ctx->name) - 1);
-    ctx->name[sizeof(ctx->name) - 1] = '\0';
-    EOS_EResult r = EOS_Sessions_StartSession(Handle, Options, ctx, on_start_session_cb);
-    if (r != EOS_Success) {
-        fndiag::log_line("[EOS] StartSession '%s' immediate fail=%d", n, (int)r);
-        delete ctx;
-    }
-    return r;
-}
-
-struct JoinCbCtx {
-    EOS_Sessions_OnJoinSessionCallback orig_cb;
-    void* orig_data;
-    char  name[128];
-};
-
-static void on_join_session_cb(const EOS_Sessions_JoinSessionCallbackInfo* Data) {
-    if (!Data) return;
-    auto* ctx = reinterpret_cast<JoinCbCtx*>(Data->ClientData);
-    fndiag::log_line("[EOS] JoinSession '%s' result=%d (0=ok)", ctx->name, (int)Data->ResultCode);
-    if (ctx->orig_cb) {
-        EOS_Sessions_JoinSessionCallbackInfo d = *Data;
-        d.ClientData = ctx->orig_data;
-        ctx->orig_cb(&d);
-    }
-    delete ctx;
-}
-
-static EOS_EResult my_JoinSession(
-    EOS_HSessions Handle,
-    const EOS_Sessions_JoinSessionOptions* Options,
-    void* ClientData,
-    EOS_Sessions_OnJoinSessionCallback CompletionDelegate)
-{
-    const char* n = (Options && Options->SessionName) ? Options->SessionName : "(null)";
-    fndiag::log_line("[EOS] JoinSession '%s' called ApiVer=%d", n, Options ? Options->ApiVersion : -1);
-    auto* ctx = new JoinCbCtx();
-    ctx->orig_cb   = CompletionDelegate;
-    ctx->orig_data = ClientData;
-    __builtin_strncpy(ctx->name, n, sizeof(ctx->name) - 1);
-    ctx->name[sizeof(ctx->name) - 1] = '\0';
-    EOS_EResult r = EOS_Sessions_JoinSession(Handle, Options, ctx, on_join_session_cb);
-    if (r != EOS_Success) {
-        fndiag::log_line("[EOS] JoinSession '%s' immediate fail=%d", n, (int)r);
-        delete ctx;
-    }
-    return r;
-}
-
 /* Diagnostic hooks for EOS session teardown.
  * Goal: determine order relative to ClientWasKicked in FnDiag.log:
  *   [EOS] EndSession 'X' called  <-- fires before or after [KickBypass] ClientWasKicked?
@@ -311,7 +188,5 @@ static EOS_EResult my_DestroySession(
 DYLD_INTERPOSE(my_BeginSession,                  EOS_AntiCheatClient_BeginSession);
 DYLD_INTERPOSE(my_GetSystemRequirementStatus,    EOS_AntiCheatClient_GetSystemRequirementStatus);
 DYLD_INTERPOSE(my_PollStatus,                    EOS_AntiCheatClient_PollStatus);
-DYLD_INTERPOSE(my_StartSession,                  EOS_Sessions_StartSession);
-DYLD_INTERPOSE(my_JoinSession,                   EOS_Sessions_JoinSession);
 DYLD_INTERPOSE(my_EndSession,                    EOS_Sessions_EndSession);
 DYLD_INTERPOSE(my_DestroySession,                EOS_Sessions_DestroySession);
