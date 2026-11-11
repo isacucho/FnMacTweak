@@ -213,10 +213,14 @@ static void kick_bypass_stub(void* self, int32_t reason) {
                     log_line("[Reconnect] EOS state >= 5 - rejoin blocked to avoid RequestExit");
                 }
             }
+            // RejoinViaSessionInternal crashes silently: by kick time the EOS SDK
+            // has freed its session handle (slot2 in UFortRejoinCheck). Even with
+            // EOS state < 5 and bCanRejoinSession forced, the internal derref faults
+            // and UE calls RequestExit(false) -> silent process exit, no IPS.
+            // Confirmed in-game: log stops immediately after the call.
+            // Fall through; NetFailurePatcher synthetic CT returns to lobby cleanly.
             if (eos_state_ok) {
-                g_rejoin_attempted.store(true, std::memory_order_release);
-                log_line("[Reconnect] calling RejoinViaSessionInternal obj=%p", obj);
-                rejoin_bypass_stub(obj);
+                log_line("[Reconnect] EOS state ok - synthetic CT will return to lobby");
             }
         }
         g_scan_running.store(false, std::memory_order_release);

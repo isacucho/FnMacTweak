@@ -39,7 +39,7 @@ static constexpr int32_t  kConnectionTimeout = 4;
 static constexpr uint64_t kInitWindowNs    = 2000000000ULL;   // 2s
 static constexpr uint64_t kFloodGapNs      = 2000000000ULL;   // 2s inter-event = flood over
 static constexpr uint64_t kMaxSupprNs      = 10000000000ULL;  // 10s init-only safety timeout
-static constexpr uint64_t kEarlyTimeoutNs  = 25000000000ULL;  // 25s: synthetic ConnectionTimeout
+static constexpr uint64_t kEarlyTimeoutNs  = 8000000000ULL;   // 8s: synthetic ConnectionTimeout
 // ARM64 encoding of island instructions (version-independent)
 static constexpr uint32_t kIslandCbzX16  = 0xB4000050U; // CBZ X16, +8 (skip BR if slot==0)
 static constexpr uint32_t kIslandBrX16   = 0xD61F0200U; // BR X16
@@ -108,7 +108,7 @@ static void bnf_bypass_stub(void* self, void* world, void* net_driver,
                                 log_line("[NetFailurePatch] synthetic ConnectionTimeout: stale params, skip");
                                 return;
                             }
-                            log_line("[NetFailurePatch] synthetic ConnectionTimeout firing (25s early)");
+                            log_line("[NetFailurePatch] synthetic ConnectionTimeout firing (8s early)");
                             fn(s, w, d, kConnectionTimeout, (void*)&s_empty_fstr);
                         });
                     log_line("[NetFailurePatch] ConnectionLost suppressed (dk=%llums%s) - 25s timer armed",
