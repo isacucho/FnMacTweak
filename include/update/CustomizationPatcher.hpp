@@ -3,21 +3,24 @@
 
 namespace fndiag {
 
-// Trampoline hook for HandleCustomizationFailed (UFortCustomizationAssetLoader).
-// When the game calls this delegate, the failure counter that drives reason=144
-// kicks would be incremented. The hook replaces the function body with a no-op
-// ret so the counter stays at zero and the server never sees load failures.
+// Vtable pointer patch for HandleCustomizationFailed (UFortCustomizationAssetLoader).
+// Redirects the vtable slot in __DATA_CONST to our no-op stub so the game never
+// increments NumLoadCustomizationFailed and the server never sends reason=144.
 //
-// kHandleCustomizationFailedOff: offset from image base to the first instruction
-// of HandleCustomizationFailed. Filled in after LLDB discovery (lcf_find command
-// in tools/lldb_diag.py). Zero = patch disabled.
+// Patching __DATA_CONST (not __TEXT) avoids the CS_KILL enforcement that fires
+// when a modified __TEXT page is executed on this iOS-platform binary.
 //
-// To discover: run Fortnite with LLDB attached, execute:
+// kHandleCustomizationFailedVtableOff: offset from image base to the vtable slot
+// (8-byte pointer) that holds HandleCustomizationFailed's address at runtime.
+// Zero = patch disabled.
+//
+// To discover: run Fortnite with LLDB attached, then:
 //   (lldb) command script import tools/lldb_diag.py
-//   (lldb) lcf_find
-// The command logs "lcf_find: fn_offset=0x<hex>" to stdout - copy that value here.
+//   (lldb) lcf_find_ptr
+// The command prints "ptr_offset_from_base=0x<hex>" - copy that here.
+// (Also run lcf_find to get the function offset for reference.)
 
-static constexpr uint64_t kHandleCustomizationFailedOff = 0xa30b6f4ULL;
+static constexpr uint64_t kHandleCustomizationFailedVtableOff = 0ULL; // fill after lcf_find_ptr
 
 void install_customization_patch();
 

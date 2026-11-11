@@ -213,11 +213,10 @@ static void kick_bypass_stub(void* self, int32_t reason) {
                     log_line("[Reconnect] EOS state >= 5 - rejoin blocked to avoid RequestExit");
                 }
             }
-            // Rejoin disabled: diagnostic only. Calling RejoinViaSessionInternal
-            // crashes silently even when state < 5 (EOS handle at slot2 is likely
-            // freed/invalid by kick time). Log state and fall through to synthetic CT.
             if (eos_state_ok) {
-                log_line("[Reconnect] EOS state ok but rejoin skipped (diagnostic mode)");
+                g_rejoin_attempted.store(true, std::memory_order_release);
+                log_line("[Reconnect] calling RejoinViaSessionInternal obj=%p", obj);
+                rejoin_bypass_stub(obj);
             }
         }
         g_scan_running.store(false, std::memory_order_release);

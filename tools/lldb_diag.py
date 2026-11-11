@@ -397,6 +397,123 @@ def lcf_find(debugger, command, result, internal_dict):
     result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
 
 
+def lcf_find_ptr(debugger, command, result, internal_dict):
+    """
+    lcf_find_ptr: scan __DATA_CONST at runtime for a pointer to
+    HandleCustomizationFailed (offset 0xa30b6f4).  If found, reports the
+    vtable slot as an offset from img_base so CustomizationPatcher can patch
+    it in __DATA_CONST (no __TEXT write, no CS enforcement issue).
+
+    Usage: (lldb) lcf_find_ptr
+    """
+    import struct, time as _time
+
+    LCF_OFF = 0xa30b6f4   # known offset of HandleCustomizationFailed
+
+    target  = debugger.GetSelectedTarget()
+    process = target.GetProcess()
+    err     = lldb.SBError()
+
+    was_running = (process.GetState() == lldb.eStateRunning)
+    if was_running:
+        process.Stop()
+        for _ in range(30):
+            if process.GetState() != lldb.eStateRunning:
+                break
+            _time.sleep(0.1)
+
+    # img_base
+    img_base = 0
+    fn_module = None
+    for i in range(target.GetNumModules()):
+        m = target.GetModuleAtIndex(i)
+        name = m.GetFileSpec().GetFilename()
+        if "FortniteClient" in name or i == 0:
+            img_base = m.GetObjectFileHeaderAddress().GetLoadAddress(target)
+            if img_base and img_base != lldb.LLDB_INVALID_ADDRESS:
+                fn_module = m
+                print(f"[lcf_find_ptr] img_base=0x{img_base:x} ({name})")
+                break
+
+    if not img_base or img_base == lldb.LLDB_INVALID_ADDRESS:
+        print("[lcf_find_ptr] FAIL: cannot determine image base")
+        if was_running: process.Continue()
+        return
+
+    fn_addr = img_base + LCF_OFF
+    needle  = struct.pack('<Q', fn_addr)
+    print(f"[lcf_find_ptr] searching __DATA_CONST for ptr=0x{fn_addr:x} ...")
+
+    # Collect writable data segments: __DATA_CONST and __DATA
+    scan_regions = []
+    if fn_module:
+        for si in range(fn_module.GetNumSections()):
+            seg = fn_module.GetSectionAtIndex(si)
+            sname = seg.GetName()
+            if sname in ("__DATA_CONST", "__DATA"):
+                va   = seg.GetLoadAddress(target)
+                size = seg.GetByteSize()
+                if va and va != lldb.LLDB_INVALID_ADDRESS and size:
+                    scan_regions.append((sname, va, size))
+            # subsections
+            for ssi in range(seg.GetNumSubSections()):
+                sub   = seg.GetSubSectionAtIndex(ssi)
+                ssname = sub.GetName()
+                if ssname in ("__DATA_CONST", "__DATA"):
+                    va   = sub.GetLoadAddress(target)
+                    size = sub.GetByteSize()
+                    if va and va != lldb.LLDB_INVALID_ADDRESS and size:
+                        scan_regions.append((ssname, va, size))
+
+    if not scan_regions:
+        # Fallback estimate
+        scan_regions = [
+            ("__DATA_CONST(est)", img_base + 0xDD80000, 0x6000000),
+            ("__DATA(est)",       img_base + 0xE380000, 0x6000000),
+        ]
+        print("[lcf_find_ptr] WARN: segments not found via API, using estimates")
+
+    for rname, rstart, rsize in scan_regions:
+        print(f"[lcf_find_ptr] scanning {rname}: 0x{rstart:x} - 0x{rstart+rsize:x} ({rsize//1024}KB)")
+
+    # Scan all regions
+    hits = []
+    CHUNK = 0x200000
+    for rname, rstart, rsize in scan_regions:
+        cur = rstart
+        end = rstart + rsize
+        while cur < end and len(hits) < 20:
+            read_size = min(CHUNK, end - cur)
+            mem = process.ReadMemory(cur, read_size, err)
+            if err.Fail() or not mem:
+                cur += CHUNK
+                continue
+            pos = 0
+            while True:
+                idx = mem.find(needle, pos)
+                if idx < 0: break
+                va  = cur + idx
+                off = va - img_base
+                hits.append((rname, va, off))
+                pos = idx + 1
+            cur += CHUNK
+
+    if not hits:
+        print("[lcf_find_ptr] No pointer found in __DATA_CONST or __DATA.")
+        print("[lcf_find_ptr] Function is called directly (no static pointer to redirect).")
+        print(f"[lcf_find_ptr] fn_addr runtime: 0x{fn_addr:x}")
+    else:
+        print(f"\n[lcf_find_ptr] *** {len(hits)} pointer(s) found ***")
+        for rname, va, off in hits:
+            print(f"  segment={rname}  ptr_va=0x{va:x}  ptr_offset_from_base=0x{off:x}")
+        print()
+        print("[lcf_find_ptr] Use ptr_offset_from_base as kHandleCustomizationFailedVtableOff")
+        print("[lcf_find_ptr] patch that slot = &customization_failed_stub")
+
+    if was_running: process.Continue()
+    result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
+
+
 def __lldb_init_module(debugger, internal_dict):
     debugger.HandleCommand(
         'command script add -f lldb_diag.diag_start diag_start')
@@ -404,4 +521,6 @@ def __lldb_init_module(debugger, internal_dict):
         'command script add -f lldb_diag.eos_watch eos_watch')
     debugger.HandleCommand(
         'command script add -f lldb_diag.lcf_find lcf_find')
-    print("[lldb_diag] Loaded. Commands: 'diag_start' | 'eos_watch' | 'lcf_find'")
+    debugger.HandleCommand(
+        'command script add -f lldb_diag.lcf_find_ptr lcf_find_ptr')
+    print("[lldb_diag] Loaded. Commands: 'diag_start' | 'eos_watch' | 'lcf_find' | 'lcf_find_ptr'")
