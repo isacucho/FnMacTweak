@@ -1,5 +1,4 @@
 #include "update/NetFailurePatcher.hpp"
-#include "update/KickPatcher.hpp"  // g_last_kick_suppressed_ns
 #include "core/DiagLog.hpp"
 
 #include <mach/mach.h>
@@ -7,11 +6,8 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <libkern/OSCacheControl.h>
-#include <dispatch/dispatch.h>
 #include <cstdint>
 #include <cstring>
-#include <atomic>
-#include <time.h>
 
 namespace fndiag {
 
@@ -23,23 +19,6 @@ static constexpr uintptr_t kBnfOffset     = 0x5642c74UL;
 static constexpr char     kBnfString[]    = "BroadcastNetworkFailure";
 // Scan budget: how far back to walk from ADRP+ADD to find function prologue
 static constexpr size_t   kMaxWalkback    = 0x8000U;
-// ENetworkFailure enum values (confirmed from binary ENetworkFailure strings block):
-// 0=NetDriverAlreadyExists 1=NetDriverCreateFailure 2=NetDriverListenFailure
-// 3=ConnectionLost 4=ConnectionTimeout 5=FailureReceived ...
-static constexpr int32_t  kConnectionLost    = 3;
-static constexpr int32_t  kConnectionTimeout = 4;
-// Flood suppression timing:
-// kInitWindowNs: suppress for 2s after kick before flood is detected.
-// kFloodGapNs: inter-event gap above this means flood ended.
-// kMaxSupprNs: init-only safety cap (no flood detected).
-// kEarlyTimeoutNs: at this delay post-kick, synthesize ConnectionTimeout on main queue
-//   to cut the 90s freeze. ConnectionTimeout -> clean lobby return (no NCL screen).
-//   ConnectionTimeout bypasses our BL-site hook (different call site in UNetConnection::Tick),
-//   so we can't intercept it - we replay it synthetically instead.
-static constexpr uint64_t kInitWindowNs    = 2000000000ULL;   // 2s
-static constexpr uint64_t kFloodGapNs      = 2000000000ULL;   // 2s inter-event = flood over
-static constexpr uint64_t kMaxSupprNs      = 10000000000ULL;  // 10s init-only safety timeout
-static constexpr uint64_t kEarlyTimeoutNs  = 1000000000ULL;   // 1s: synthetic ConnectionTimeout
 // ARM64 encoding of island instructions (version-independent)
 static constexpr uint32_t kIslandCbzX16  = 0xB4000050U; // CBZ X16, +8 (skip BR if slot==0)
 static constexpr uint32_t kIslandBrX16   = 0xD61F0200U; // BR X16
@@ -47,90 +26,10 @@ static constexpr uint32_t kIslandBrX16   = 0xD61F0200U; // BR X16
 using BnfFn = void (*)(void* self, void* world, void* net_driver,
                         int32_t failure_type, void* error_string);
 static BnfFn g_orig_bnf = nullptr;
-// Gap-based flood detection: tracks last suppressed ConnectionLost timestamp.
-static std::atomic<uint64_t> g_last_cl_ns{0};
-
-// Synthetic ConnectionTimeout state.
-// g_dispatched_for_kick_ns: kick timestamp for which we already dispatched;
-//   reset when a new kick timestamp is seen (handles back-to-back matches).
-// g_timeout_dispatched: guard to dispatch exactly once per kick.
-// g_saved_bnf_{self,world,driver}: BNF params captured on first ConnectionLost suppress.
-static std::atomic<uint64_t>  g_dispatched_for_kick_ns{0};
-static std::atomic<bool>      g_timeout_dispatched{false};
-static std::atomic<uintptr_t> g_saved_bnf_self{0};
-static std::atomic<uintptr_t> g_saved_bnf_world{0};
-static std::atomic<uintptr_t> g_saved_bnf_driver{0};
-
-// Minimal empty FString for the synthetic BNF call.
-// FString = { TCHAR* Data, int32 Num, int32 Max }. Num==0 -> operator*() returns TEXT("").
-static const struct { void* data; int32_t num; int32_t max; }
-    s_empty_fstr = { nullptr, 0, 0 };
 
 static void bnf_bypass_stub(void* self, void* world, void* net_driver,
                               int32_t failure_type, void* error_string) {
-    if (failure_type == kConnectionLost) {
-        uint64_t last_kick = g_last_kick_suppressed_ns.load(std::memory_order_relaxed);
-        if (last_kick != 0) {
-            uint64_t now     = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-            uint64_t last_cl = g_last_cl_ns.load(std::memory_order_relaxed);
-            uint64_t dk      = now - last_kick;
-            bool in_flood    = last_cl != 0 && (now - last_cl) < kFloodGapNs;
-            bool in_init     = dk < kInitWindowNs;
-
-            if (in_flood || (in_init && dk < kMaxSupprNs)) {
-                g_last_cl_ns.store(now, std::memory_order_relaxed);
-
-                // If this is a new kick (kick timestamp changed), reset dispatch state.
-                uint64_t prev_kick = g_dispatched_for_kick_ns.load(std::memory_order_relaxed);
-                if (prev_kick != last_kick) {
-                    g_timeout_dispatched.store(false, std::memory_order_release);
-                    g_dispatched_for_kick_ns.store(last_kick, std::memory_order_release);
-                }
-
-                // Dispatch synthetic ConnectionTimeout once per kick, on first suppress.
-                if (!g_timeout_dispatched.exchange(true, std::memory_order_acq_rel)) {
-                    g_saved_bnf_self.store((uintptr_t)self,       std::memory_order_relaxed);
-                    g_saved_bnf_world.store((uintptr_t)world,     std::memory_order_relaxed);
-                    g_saved_bnf_driver.store((uintptr_t)net_driver, std::memory_order_relaxed);
-                    dispatch_after(
-                        dispatch_time(DISPATCH_TIME_NOW, (int64_t)kEarlyTimeoutNs),
-                        dispatch_get_main_queue(), ^{
-                            // Cancel if rejoin_scan_thread already called RejoinViaSessionInternal.
-                            if (g_rejoin_attempted.load(std::memory_order_acquire)) {
-                                log_line("[NetFailurePatch] synthetic CT skipped (rejoin in progress)");
-                                return;
-                            }
-                            void* s = (void*)g_saved_bnf_self.load(std::memory_order_relaxed);
-                            void* w = (void*)g_saved_bnf_world.load(std::memory_order_relaxed);
-                            void* d = (void*)g_saved_bnf_driver.load(std::memory_order_relaxed);
-                            BnfFn fn = g_orig_bnf;
-                            if (!s || !fn) {
-                                log_line("[NetFailurePatch] synthetic ConnectionTimeout: stale params, skip");
-                                return;
-                            }
-                            log_line("[NetFailurePatch] synthetic ConnectionTimeout firing (1s early)");
-                            fn(s, w, d, kConnectionTimeout, (void*)&s_empty_fstr);
-                        });
-                    log_line("[NetFailurePatch] ConnectionLost suppressed (dk=%llums%s) - 25s timer armed",
-                             (unsigned long long)(dk / 1000000ULL),
-                             in_flood ? " flood" : " init");
-                } else {
-                    log_line("[NetFailurePatch] ConnectionLost suppressed (dk=%llums%s)",
-                             (unsigned long long)(dk / 1000000ULL),
-                             in_flood ? " flood" : " init");
-                }
-                return;
-            }
-            const char* reason = in_flood ? " flood-ended" : " init-timeout";
-            log_line("[NetFailurePatch] ConnectionLost NOT suppressed (dk=%llums%s)",
-                     (unsigned long long)(dk / 1000000ULL), reason);
-        }
-    } else {
-        uint64_t last_kick = g_last_kick_suppressed_ns.load(std::memory_order_relaxed);
-        uint64_t dk = last_kick ? (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - last_kick) : 0;
-        log_line("[NetFailurePatch] BNF type=%d dk=%llums (pass-through)",
-                 failure_type, (unsigned long long)(dk / 1000000ULL));
-    }
+    log_line("[NetFailurePatch] BNF type=%d (pass-through)", failure_type);
     if (g_orig_bnf) g_orig_bnf(self, world, net_driver, failure_type, error_string);
 }
 

@@ -6,7 +6,6 @@
 #include "core/SimulatorContext.hpp"
 #include "core/OsLogInterceptor.hpp"
 #include "update/KickPatcher.hpp"
-#include "update/NetFailurePatcher.hpp"
 #include "network/EacHooks.hpp"
 #include "update/UpdateHooks.hpp"
 #include "metadata/DeviceSpoof.hpp"
@@ -45,24 +44,10 @@ __attribute__((constructor)) static void fncompat_init() {
         installSpoofHooks();
         BOOT_PROBE("5_spoof_done");
 
-        // Validation patch: reemplaza vtable 0xcd32e18 y 0xcd32df8 con un stub
-        // que siempre pasa, evitando el kick por performance counters (reasons 10/6).
-        // Solo toca __DATA_CONST; EAC no hashea esta seccion.
+        // ValidationPatch: suprime la deteccion sideload/JIT en vtable 0xcd32e18 y
+        // 0xcd32df8. El stub devuelve 0 antes de que se active el dispatch de kick.
         fndiag::install_validation_patch();
         BOOT_PROBE("6_validation_done");
-
-        // KickBypass: vtable patch para ClientWasKicked(EFortKickReason) (18 entradas)
-        // y ClientWasKicked(FText) (18 entradas, offset-8 de las anteriores).
-        // La ruta FText es la que lleva el kick de EAC registration failure:
-        // "Client failed to register with server. Please restart Fortnite."
-        fndiag::install_kick_bypass();
-        BOOT_PROBE("6b_kickbypass_done");
-
-        // NetFailurePatcher: intercepta BroadcastNetworkFailure y suprime ConnectionLost
-        // que sigue a un kick suprimido (g_last_kick_suppressed_ns != 0).
-        // Dispara un ConnectionTimeout sintetico a 1s para volver al lobby limpiamente.
-        fndiag::install_net_failure_patch();
-        BOOT_PROBE("6c_netfailure_done");
 
         // EAC registration hooks (todos via MSHookFunction - no hay stubs PLT en game binary):
         //   - GetSystemRequirementStatus -> 0: evita que el plugin UE5 bloquee BeginSession.
