@@ -6,6 +6,7 @@
 #include "core/SimulatorContext.hpp"
 #include "core/OsLogInterceptor.hpp"
 #include "update/KickPatcher.hpp"
+#include "update/NetFailurePatcher.hpp"
 #include "network/EacHooks.hpp"
 #include "update/UpdateHooks.hpp"
 #include "metadata/DeviceSpoof.hpp"
@@ -56,6 +57,12 @@ __attribute__((constructor)) static void fncompat_init() {
         // "Client failed to register with server. Please restart Fortnite."
         fndiag::install_kick_bypass();
         BOOT_PROBE("6b_kickbypass_done");
+
+        // NetFailurePatcher: intercepta BroadcastNetworkFailure y suprime ConnectionLost
+        // que sigue a un kick suprimido (g_last_kick_suppressed_ns != 0).
+        // Dispara un ConnectionTimeout sintetico a 1s para volver al lobby limpiamente.
+        fndiag::install_net_failure_patch();
+        BOOT_PROBE("6c_netfailure_done");
 
         // EAC registration hooks (todos via MSHookFunction - no hay stubs PLT en game binary):
         //   - GetSystemRequirementStatus -> 0: evita que el plugin UE5 bloquee BeginSession.
