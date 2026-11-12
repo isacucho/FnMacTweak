@@ -6,6 +6,8 @@
 #include "core/SimulatorContext.hpp"
 #include "update/KickPatcher.hpp"
 #include "metadata/DeviceSpoof.hpp"
+#include "eos/EosHooks.hpp"
+#include "eos/MkwBypass.hpp"
 
 #ifndef MODULE_VERSION
 #define MODULE_VERSION "1.0.0"
@@ -32,6 +34,10 @@ __attribute__((constructor)) static void fncompat_init() {
         installSpoofHooks();
         BOOT_PROBE("4_spoof_done");
         fndiag::install_validation_patch();
-        BOOT_PROBE("4_validation_done");
+        BOOT_PROBE("5_validation_done");
+        install_eos_hooks();
+        BOOT_PROBE("6_eos_hooks_done");
+        install_mkw_hooks();
+        BOOT_PROBE("7_mkw_hooks_done");
     }
 }
