@@ -107,6 +107,13 @@ static EOS_EResult my_BeginSession(
     }
     EOS_EResult r = EOS_AntiCheatClient_BeginSession(Handle, Options);
     fndiag::log_line("[EOS] BeginSession -> result=%d (0=success)", (int)r);
+    /* En macOS ejecutando un binario iOS el EAC server rechaza el cliente.
+       Forzar EOS_Success para que el juego no muestre "Client failed to
+       register with server" (errors.com.epicgames.common.processing). */
+    if (r != EOS_Success) {
+        fndiag::log_line("[EOS] BeginSession: overriding result to EOS_Success");
+        return EOS_Success;
+    }
     return r;
 }
 
@@ -146,9 +153,12 @@ static EOS_EResult my_PollStatus(
         Handle, Options, OutViolationType, OutActionInfo);
     int32_t vtype = OutViolationType ? *OutViolationType : -1;
     if (r != EOS_Success || vtype != 0) {
-        fndiag::log_line("[EOS] PollStatus result=%d violation=%d", (int)r, vtype);
+        fndiag::log_line("[EOS] PollStatus result=%d violation=%d -- suprimiendo", (int)r, vtype);
     }
-    return r;
+    /* Suprimir cualquier violation para evitar kick por EAC en macOS. */
+    if (OutViolationType) *OutViolationType = 0;
+    if (OutActionInfo)    *OutActionInfo    = nullptr;
+    return EOS_Success;
 }
 
 /* Diagnostic hooks for EOS session teardown.
