@@ -32,16 +32,13 @@ typedef void (*MKWCallbackBool)(bool success, const char* msg);
 typedef void (*MKWCallbackLong)(long  type,   const char* msg);
 
 /*
- * Simbolos Swift originales exportados por MarketplaceKitWrapper.framework.
- * Los nombres Swift contienen '$' que no es valido en C++, asi que usamos
- * __asm__ para mapear identificadores C a los simbolos reales del linker.
+ * MarketplaceKitWrapper exporta tanto los simbolos Swift-mangled como simbolos
+ * C planos (_MKW_GetCurrent, etc.). El binario de Fortnite llama a los C planos.
+ * DYLD_INTERPOSE debe apuntar a esos, no a los mangled Swift.
  */
-extern "C" void mkw_orig_eligibility(MKWCallbackBool cb)
-    __asm__("_$s21MarketplaceKitWrapper24MKW_GetEligibilityRegionyyySb_SPys4Int8VGSgtXCF");
-extern "C" void mkw_orig_cttoken(MKWCallbackBool cb)
-    __asm__("_$s21MarketplaceKitWrapper18MKW_RequestCTTokenyyySb_SPys4Int8VGSgtXCF");
-extern "C" void mkw_orig_getcurrent(MKWCallbackLong cb)
-    __asm__("_$s21MarketplaceKitWrapper14MKW_GetCurrentyyySi_SPys4Int8VGSgtXCF");
+extern "C" void MKW_GetEligibilityRegion(MKWCallbackBool cb);
+extern "C" void MKW_RequestCTToken(MKWCallbackBool cb);
+extern "C" void MKW_GetCurrent(MKWCallbackLong cb);
 
 static void my_MKW_GetEligibilityRegion(MKWCallbackBool cb) {
     fndiag::log_line("[MkwBypass] GetEligibilityRegion -> EU eligible");
@@ -59,6 +56,6 @@ static void my_MKW_GetCurrent(MKWCallbackLong cb) {
     if (cb) cb(3, "marketplace");
 }
 
-DYLD_INTERPOSE(my_MKW_GetEligibilityRegion, mkw_orig_eligibility);
-DYLD_INTERPOSE(my_MKW_RequestCTToken,      mkw_orig_cttoken);
-DYLD_INTERPOSE(my_MKW_GetCurrent,          mkw_orig_getcurrent);
+DYLD_INTERPOSE(my_MKW_GetEligibilityRegion, MKW_GetEligibilityRegion);
+DYLD_INTERPOSE(my_MKW_RequestCTToken,      MKW_RequestCTToken);
+DYLD_INTERPOSE(my_MKW_GetCurrent,          MKW_GetCurrent);
