@@ -38,7 +38,8 @@ CPP_SRC := \
     src/input/FpsUnlock.cpp \
     src/input/InputIni.cpp \
     src/input/NativeKbm.cpp \
-    src/eos/EosHooks.cpp
+    src/eos/EosHooks.cpp \
+    src/eos/MkwBypass.cpp
 
 # Fuentes ObjC++ (compilados con -fobjc-arc)
 MM_SRC := \

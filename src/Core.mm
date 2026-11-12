@@ -4,15 +4,8 @@
 
 #include "core/DiagLog.hpp"
 #include "core/SimulatorContext.hpp"
-#include "core/OsLogInterceptor.hpp"
 #include "update/KickPatcher.hpp"
-#include "network/EacHooks.hpp"
-#include "update/UpdateHooks.hpp"
 #include "metadata/DeviceSpoof.hpp"
-
-// Resto de modulos: compilados pero no llamados desde el constructor.
-// Sirven como backup activo; reintroducirlos no requiere reconstruir el dylib.
-// (KickBypass, NmtPatcher, CustomizationPatcher, NetFailurePatcher, etc.)
 
 #ifndef MODULE_VERSION
 #define MODULE_VERSION "1.0.0"
@@ -34,29 +27,11 @@ __attribute__((constructor)) static void fncompat_init() {
         fndiag::log_init(container + "/Documents/FnDiag.log");
         BOOT_PROBE("3_log_init_done");
 
-        // Interceptor de os_log y NSLog: captura mensajes del juego con campos
-        // <private> antes del filtro del sistema. Ver OsLogInterceptor.hpp.
-        fndiag::install_oslog_interceptor();
-        BOOT_PROBE("4_oslog_done");
-
-        // DeviceSpoof: fingerprint iPad14,3 / iOS 17.5 + parche isiOSAppOnMac en EOSSDK.
-        // Debe instalarse antes de cualquier llamada al EOSSDK.
-        installSpoofHooks();
-        BOOT_PROBE("5_spoof_done");
-
         // ValidationPatch: suprime la deteccion sideload/JIT en vtable 0xcd32e18 y
         // 0xcd32df8. El stub devuelve 0 antes de que se active el dispatch de kick.
+        installSpoofHooks();
+        BOOT_PROBE("4_spoof_done");
         fndiag::install_validation_patch();
-        BOOT_PROBE("6_validation_done");
-
-        // EAC registration hooks (todos via MSHookFunction - no hay stubs PLT en game binary):
-        //   - GetSystemRequirementStatus -> 0: evita que el plugin UE5 bloquee BeginSession.
-        //   - BeginSession: log del resultado.
-        //   - ReceiveMessageFromServer: suprime mensajes {ind=1, type in {5,19,23,49}}.
-        //   - PollStatus -> 0: evita kick por fallo de registro en bucle.
-        //   - Spoof HTTP: verify/match allow:true, verify/event 200.
-        installNetHooks();
-        fndiag::install_network_hooks();
-        BOOT_PROBE("7_nethooks_done");
+        BOOT_PROBE("4_validation_done");
     }
 }
