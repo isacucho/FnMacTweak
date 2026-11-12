@@ -50,14 +50,12 @@ __attribute__((constructor)) static void fncompat_init() {
         fndiag::install_validation_patch();
         BOOT_PROBE("6_validation_done");
 
-        // EAC registration hooks:
-        //   - MSHookFunction en EOSSDK (ReceiveMessageFromServer, BeginSession):
-        //     parchea el prologo de la funcion directamente; unico metodo que funciona
-        //     porque el binario del juego no tiene stubs PLT para EOS_AntiCheatClient_*.
-        //   - Supresion de mensajes tipo {5,19,23,49} con indicador=1 (causa del error
-        //     "Client failed to register with server").
-        //   - Spoof de respuestas verify/match y verify/event (HTTP layer).
-        //   - EosHooks (GetSystemRequirementStatus -> 0) via DYLD_INTERPOSE en EosHooks.cpp.
+        // EAC registration hooks (todos via MSHookFunction - no hay stubs PLT en game binary):
+        //   - GetSystemRequirementStatus -> 0: evita que el plugin UE5 bloquee BeginSession.
+        //   - BeginSession: log del resultado.
+        //   - ReceiveMessageFromServer: suprime mensajes {ind=1, type in {5,19,23,49}}.
+        //   - PollStatus -> 0: evita kick por fallo de registro en bucle.
+        //   - Spoof HTTP: verify/match allow:true, verify/event 200.
         installNetHooks();
         fndiag::install_network_hooks();
         BOOT_PROBE("7_nethooks_done");

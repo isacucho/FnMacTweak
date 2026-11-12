@@ -564,6 +564,8 @@ __attribute__((used, section("__DATA,__interpose"))) static const EacInterpose g
 // ----------------------------------------------------------------
 static int32_t (*g_orig_receive_msg)(void*, const void*) = nullptr;
 static int32_t (*g_orig_begin_session)(void*, const void*) = nullptr;
+static int32_t (*g_orig_get_sys_req)(void*) = nullptr;
+static int32_t (*g_orig_poll_status)(void*, void*) = nullptr;
 
 static int32_t h_msh_receive_msg(void* h, const void* opts) {
     static int s_msh_count = 0;
@@ -596,6 +598,22 @@ static int32_t h_msh_begin_session(void* h, const void* opts) {
     return r;
 }
 
+// GetSystemRequirementStatus: si devuelve != 0 el plugin UE5 nunca llama a BeginSession.
+// Forzamos EOS_Success (0) siempre.
+static int32_t h_msh_get_sys_req(void* h) {
+    int32_t r = g_orig_get_sys_req ? g_orig_get_sys_req(h) : 0;
+    fndiag::log_line("[EAC-SYSREQ] GetSystemRequirementStatus orig=%d -> forced 0", r);
+    return 0; // EOS_Success
+}
+
+// PollStatus: si devuelve != 0 el game detecta fallo de registro y kickea.
+// Forzamos EOS_Success (0) siempre.
+static int32_t h_msh_poll_status(void* h, void* out) {
+    int32_t r = g_orig_poll_status ? g_orig_poll_status(h, out) : 0;
+    fndiag::log_line("[EAC-POLL] PollStatus orig=%d -> forced 0", r);
+    return 0; // EOS_Success
+}
+
 static void install_eac_mshooks() {
     MSHookFunction_eac_t mshook = (MSHookFunction_eac_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
     if (!mshook) {
@@ -622,6 +640,24 @@ static void install_eac_mshooks() {
     if (sym2) {
         mshook(sym2, (void*)h_msh_begin_session, (void**)&g_orig_begin_session);
         fndiag::log_line("[EAC-HOOK] BeginSession hooked @ %p", sym2);
+    }
+
+    void* sym3 = dlsym(RTLD_DEFAULT, "_EOS_AntiCheatClient_GetSystemRequirementStatus");
+    if (!sym3) sym3 = dlsym(RTLD_DEFAULT, "EOS_AntiCheatClient_GetSystemRequirementStatus");
+    if (sym3) {
+        mshook(sym3, (void*)h_msh_get_sys_req, (void**)&g_orig_get_sys_req);
+        fndiag::log_line("[EAC-HOOK] GetSystemRequirementStatus hooked @ %p", sym3);
+    } else {
+        fndiag::log_line("[EAC-HOOK] WARN: GetSystemRequirementStatus no encontrado");
+    }
+
+    void* sym4 = dlsym(RTLD_DEFAULT, "_EOS_AntiCheatClient_PollStatus");
+    if (!sym4) sym4 = dlsym(RTLD_DEFAULT, "EOS_AntiCheatClient_PollStatus");
+    if (sym4) {
+        mshook(sym4, (void*)h_msh_poll_status, (void**)&g_orig_poll_status);
+        fndiag::log_line("[EAC-HOOK] PollStatus hooked @ %p", sym4);
+    } else {
+        fndiag::log_line("[EAC-HOOK] WARN: PollStatus no encontrado");
     }
 }
 
