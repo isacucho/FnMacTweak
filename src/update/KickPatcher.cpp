@@ -49,7 +49,7 @@ static constexpr uintptr_t kSpectateSlotOff    = 0x12bfa888ULL;
 // Magic: first word of the island when patch_binary.py has applied the BeginSpectating patch.
 static constexpr uint32_t kSpectateIslandMagic = 0xb00395b0U; // ADRP X16
 
-// 18 vtable entries for ClientWasKicked (file offsets from IMAGE_BASE) in __DATA_CONST.
+// 18 vtable entries for ClientWasKicked(EFortKickReason) in __DATA_CONST.
 static const uintptr_t kVtableOffsets[] = {
     0xcd553e0ULL, 0xcf20578ULL, 0xd4ec278ULL, 0xd4f0bd0ULL, 0xd4f39d0ULL,
     0xd4f94c0ULL, 0xd4fc0f0ULL, 0xd4ff218ULL, 0xd504140ULL, 0xd50ae40ULL,
@@ -58,15 +58,41 @@ static const uintptr_t kVtableOffsets[] = {
 };
 static constexpr int kVtableCount = static_cast<int>(sizeof(kVtableOffsets) / sizeof(kVtableOffsets[0]));
 
+// Text-based ClientWasKicked_Implementation(FText) - vtable at [kVtableOffsets[i] - 8].
+// This path carries EAC registration failures: "Client failed to register with server."
+// kVtableOffsets[i] - 8 == the slot immediately before each numeric kick entry.
+// Confirmed across vtable 0 (0xcd553d8), vtable 1 (0xcf20570), vtable 2 (0xd4ec270).
+static constexpr uintptr_t kTextKickedFnOffset = 0x0552ce04ULL;
+static const uintptr_t kTextVtableOffsets[] = {
+    0xcd553d8ULL, 0xcf20570ULL, 0xd4ec270ULL, 0xd4f0bc8ULL, 0xd4f39c8ULL,
+    0xd4f94b8ULL, 0xd4fc0e8ULL, 0xd4ff210ULL, 0xd504138ULL, 0xd50ae38ULL,
+    0xd5796f0ULL, 0xd5f6010ULL, 0xd5f91b0ULL, 0xd5fc450ULL, 0xd5ff6c0ULL,
+    0xd63c978ULL, 0xd6bea88ULL, 0xd6e4800ULL,
+};
+static constexpr int kTextVtableCount = static_cast<int>(sizeof(kTextVtableOffsets) / sizeof(kTextVtableOffsets[0]));
+
 using KickedFn    = void (*)(void* self, int32_t reason);
+using TextKickedFn = void (*)(void* self, void* ftext);
 using SpectatingFn = void (*)(void* self, void* arg1);
 using RejoinFn    = void (*)(void* self);  // UFortRejoinCheck::RejoinViaSessionInternal
 
-static KickedFn    g_orig_kicked   = nullptr;
-static SpectatingFn g_orig_spectate = nullptr;
-static RejoinFn    g_orig_rejoin   = nullptr;
+static KickedFn     g_orig_kicked      = nullptr;
+static TextKickedFn g_orig_text_kicked = nullptr;
+static SpectatingFn g_orig_spectate    = nullptr;
+static RejoinFn     g_orig_rejoin      = nullptr;
 // Re-entrancy guard: kept for safety.
 static std::atomic<bool> g_kick_in_orig{false};
+
+static void text_kick_bypass_stub(void* self, void* /*ftext*/) {
+    // EAC registration failure arrives here as:
+    // "Client failed to register with server. Please restart Fortnite."
+    // The server sends this via APlayerController::ClientWasKicked(FText) RPC.
+    // Suppress unconditionally: no legitimate FText kick path is expected on
+    // Sideloadly iOS-on-macOS (ban kicks arrive through the numeric path).
+    log_line("[KickBypass] TextClientWasKicked suppressed (EAC registration) self=%p", self);
+    g_last_kick_suppressed_ns.store(
+        clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), std::memory_order_relaxed);
+}
 
 // vtable VA for UFortRejoinCheck, computed in install_kick_bypass.
 // Used by rejoin_scan_thread to search the heap.
@@ -274,6 +300,20 @@ void install_kick_bypass() {
 
     log_line("[KickBypass] vtable patch: %d/%d entries patched slide=0x%lx orig=0x%lx stub=0x%lx",
              patched, kVtableCount, (long)slide, (long)orig_va, (long)stub_va);
+
+    // --- TEXT-based ClientWasKicked_Implementation(FText) bypass ---
+    // vtable slot immediately before each numeric kick entry (kVtableOffsets[i] - 8).
+    // Carries EAC registration failure: "Client failed to register with server."
+    uintptr_t text_orig_va  = base + kTextKickedFnOffset;
+    uintptr_t text_stub_va  = reinterpret_cast<uintptr_t>(text_kick_bypass_stub);
+    g_orig_text_kicked = reinterpret_cast<TextKickedFn>(text_orig_va);
+    int text_patched = 0;
+    for (int i = 0; i < kTextVtableCount; ++i) {
+        mach_vm_address_t entry_va = static_cast<mach_vm_address_t>(base + kTextVtableOffsets[i]);
+        if (patch_vtable_entry(entry_va, text_orig_va, text_stub_va)) ++text_patched;
+    }
+    log_line("[KickBypass] TextKick vtable patch: %d/%d entries patched orig=0x%lx stub=0x%lx",
+             text_patched, kTextVtableCount, (long)text_orig_va, (long)text_stub_va);
 
     // --- RejoinViaSessionInternal vtable hook ---
     // UFortRejoinCheck::RejoinViaSessionInternal has 1 vtable entry.

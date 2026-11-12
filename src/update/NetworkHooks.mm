@@ -76,51 +76,7 @@ void log_after_delegate(id task, id location) {
     log_line("after delegate: task #%lu temp still exists=%d", send<unsigned long>(task, sel("taskIdentifier")), exists);
 }
 
-// Funció auxiliar per pegar el canvi a qualsevol NSURLRequest que vagi a verify/event
 id patch_request_if_needed(id request) {
-    if (!request) return nil;
-    NSURL *url = [request URL];
-    NSString *urlString = [url absoluteString];
-    
-    if (urlString && [urlString containsString:@"/api/verify/event"]) {
-        std::string aid_str = fndiag_get_logged_account_id();
-        if (aid_str.empty()) {
-            log_line("[NetHook] verify/event: account_id no disponible aun, omitiendo inyeccion");
-            return request;
-        }
-        NSString *aid = [NSString stringWithUTF8String:aid_str.c_str()];
-        log_line("[NetHook] verify/event -> inyectando account_id: %s", aid_str.c_str());
-        NSMutableURLRequest *mutableReq = [request mutableCopy];
-
-        [mutableReq setValue:aid forHTTPHeaderField:@"X-Epic-AccountId"];
-        [mutableReq setValue:aid forHTTPHeaderField:@"AccountID"];
-
-        NSData *body = [mutableReq HTTPBody];
-        if (body) {
-            NSError *jsonError = nil;
-            id JSONObject = [NSJSONSerialization JSONObjectWithData:body options:NSJSONReadingMutableContainers error:&jsonError];
-            if ([JSONObject isKindOfClass:[NSMutableDictionary class]] && !jsonError) {
-                NSMutableDictionary *jsonDict = (NSMutableDictionary *)JSONObject;
-                if (!jsonDict[@"accountId"] && !jsonDict[@"AccountID"]) {
-                    jsonDict[@"accountId"] = aid;
-                    NSData *newBody = [NSJSONSerialization dataWithJSONObject:jsonDict options:0 error:nil];
-                    if (newBody) {
-                        [mutableReq setHTTPBody:newBody];
-                        log_line("[NetHook] account_id inyectado en JSON body de verify/event");
-                    }
-                }
-            }
-        } else {
-            NSDictionary *dict = @{@"accountId": aid};
-            NSData *newBody = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
-            if (newBody) {
-                [mutableReq setHTTPBody:newBody];
-                [mutableReq setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-                log_line("[NetHook] body creado con account_id para verify/event");
-            }
-        }
-        return mutableReq;
-    }
     return request;
 }
 

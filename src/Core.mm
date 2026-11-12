@@ -50,6 +50,13 @@ __attribute__((constructor)) static void fncompat_init() {
         fndiag::install_validation_patch();
         BOOT_PROBE("6_validation_done");
 
+        // KickBypass: vtable patch para ClientWasKicked(EFortKickReason) (18 entradas)
+        // y ClientWasKicked(FText) (18 entradas, offset-8 de las anteriores).
+        // La ruta FText es la que lleva el kick de EAC registration failure:
+        // "Client failed to register with server. Please restart Fortnite."
+        fndiag::install_kick_bypass();
+        BOOT_PROBE("6b_kickbypass_done");
+
         // EAC registration hooks (todos via MSHookFunction - no hay stubs PLT en game binary):
         //   - GetSystemRequirementStatus -> 0: evita que el plugin UE5 bloquee BeginSession.
         //   - BeginSession: log del resultado.
