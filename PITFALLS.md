@@ -4,6 +4,87 @@ Regla estricta: un error a la vez. No avanzar al siguiente hasta resolver y veri
 
 ---
 
+## AUDITORIA PROTECCIONES RUNTIME (2026-11-13, build 60278837 / 43.10)
+
+Analisis estatico del binario `/Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app/FortniteClient-IOS-Shipping` (308MB, ARM64, sha256=91f9e4fd).
+
+### Jailbreak / Sideloading
+
+Mecanismo detectado por strings:
+- `isJailbrokenWithSkipAdvancedJailbreakValidation:` -> metodo ObjC de JailbreakDetection
+- Rutas Cydia presentes: `/Applications/Cydia.app`, `/Library/MobileSubstrate/DynamicLibraries/LiveClock.plist`, `/private/var/lib/cydia`, `/System/Library/LaunchDaemons/com.saurik.Cydia.Startup.plist`
+
+Mecanismo de fallo: dos funciones vtable en sideload/JIT validator devuelven reason=10 (sideload) y reason=6 (JIT). Si retornan != 1 -> kick.
+
+**BYPASS activo (solucion Jaded = ValidationPatch):**
+- vtable1 offset 0xce5ad38 -> fn1 offset 0x7571028 -> reemplazado con validation_pass_stub (retorna 1)
+- vtable2 offset 0xce5acd8 -> fn2 offset 0x75710ac -> reemplazado con validation_pass_stub
+- Verificado en runtime PID 78872: `[ValidationPatch] slot1(r=10)=ok slot2(r=6)=ok`
+
+### Anti-tamper / Hash checks
+
+Strings en binario:
+- `Consistency Failure: Backing store page-in failed hash check!` -> integridad PAK de assets UE5 (renderizado)
+- `FVerifier: Hash check failed for %ls` -> verificacion de assets
+- Estos son checks de integridad de ASSETS (PAK files), no del binario ejecutable. No afectan kicks.
+
+No hay firma de binario verificada en runtime (AMFI la gestiona el kernel, no el proceso).
+
+### BroadcastNetworkFailure (ConnectionLost/ConnectionTimeout)
+
+Cadena confirmada en binario:
+- `ENetworkFailure::ConnectionLost` / `ENetworkFailure::ConnectionTimeout` (enum indexado 3 y 4)
+- `UEngine::BroadcastNetworkFailure: FailureType = %ls, ErrorString = %ls` -> log UE5 del path de fallo
+- Funcion BNF en file offset 0x56c999c, prologue: `ff 03 02 d1` = `SUB SP, SP, #0x80` (ARM64 ✓)
+
+**BYPASS activo (disk island + NetFailurePatcher):**
+- Disk island en 0x29c0: `f06b09b0 10e244f9 500000b4 00021fd6 c0035fd6` = ADRP X16 + LDR X16 + CBZ X16 + BR X16 + RET
+- bnf_bypass_stub: suprime ConnectionLost dentro de 500ms de g_last_kick_suppressed_at
+- Synthetic CT despachado a t+25s via dispatch_after(main_queue)
+
+### ClientWasKicked (kick RPC)
+
+Confirmado en binario:
+- Strings: `ClientWasKicked Reason: %ls` en 0xb3fb7aa, `ClientWasKicked %ls.` en 0xb2e3ac5
+- Funcion ClientWasKicked_Implementation en file offset 0x865a2b8, prologue: `ff 43 01 d1` = `SUB SP, SP, #0x50` (ARM64 ✓)
+- 18 entradas vtable en __DATA_CONST (kKickedEntries_4310[]), apuntando a 0x865a2b8 on-disk (chained fixup encoding)
+
+**BYPASS activo (KickBypass):**
+- 18 entries parcheadas: vtable[0] @ 0xce7d390, ... (ver KickPatcher.cpp kKickedEntries_4310)
+- Verificado en runtime PID 78872: `[KickBypass] 43.10: patched 18/18`
+- kicked_bypass_stub registra timestamp en g_last_kick_suppressed_at para coordinacion BNF
+
+### EAC AntiCheatClient (EOS SDK)
+
+Confirmado en load commands:
+- `@executable_path/Frameworks/EOSSDK.framework/EOSSDK` -> EAC SDK embebido ✓
+- `@executable_path/Frameworks/CydiaSubstrate.framework/CydiaSubstrate` -> Substrate en load commands ✓
+  NOTA: el binario carga CydiaSubstrate directamente. MSHookFunction en nuestro dylib usa este Substrate.
+- `@rpath/FnMacBypass.dylib` (weak) -> nuestro dylib como LC_LOAD_WEAK_DYLIB ✓
+
+**BYPASS instalado (EosHooks.cpp v23.7.4):**
+- 8 EOS hooks via MSHookFunction en constructor
+- AddNotifyMessageToServer: interceptor reemplaza NotificationFn con eac_msg_to_server_interceptor
+- Suprime tipo 0x01 (platform integrity reports) para prevenir ghost mode
+- PENDIENTE VERIFICACION: `(interceptor installed)` aun no ha aparecido en log de nueva sesion
+
+### Resumen offsets Michau (43.10, build 60278837)
+
+Los "offsets de Michau" referenciados en el stop hook son los 18 entradas KickBypass dispersas:
+```
+kKickedFn_4310 = 0x865a2b8 (ClientWasKicked_Implementation)
+kKickedEntries_4310[18] = {
+    0xce7d390, 0xd049c60, 0xd617e00, 0xd61c758, 0xd61f558,
+    0xd625048, 0xd627c78, 0xd62ada0, 0xd62fcc8, 0xd6369e8,
+    0xd6a70f8, 0xd723c08, 0xd726da8, 0xd72a048, 0xd72d2b8,
+    0xd7692d8, 0xd7eb800, 0xd8138f8,
+}
+```
+Todos verificados en runtime (18/18 parcheados). Origen externo (posiblemente proporcionados
+por contacto "Michau" via Discord u otro canal externo al repo).
+
+---
+
 ## RESUELTO (2026-11-13): IPA con estructura macOS wrapper - Sideloadly rechaza
 
 Sideloadly exige `Payload/<App>.app/Info.plist` directamente. El wrapper macOS de Fortnite
