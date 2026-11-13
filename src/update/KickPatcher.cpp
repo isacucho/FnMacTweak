@@ -8,8 +8,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <mach/mach_time.h>
 
 namespace fndiag {
+
+std::atomic<uint64_t> g_last_kick_suppressed_at{0};
 
 // ============================================================
 // Validation Patch (solucion Jaded)
@@ -48,7 +52,9 @@ static uint32_t read_bundle_build_id() {
 }
 
 static uintptr_t validation_pass_stub(void* /*self*/, uintptr_t, uintptr_t, uintptr_t) {
-    return 0;
+    // fn1/fn2 retornan 1 en el path normal (validacion OK) y 0 en early-exit (fallo).
+    // Devolvemos 1 para indicar "validacion exitosa, no sideload detectado".
+    return 1;
 }
 
 static bool patch_vtable_entry(mach_vm_address_t va, uintptr_t expected, uintptr_t replacement) {
@@ -109,6 +115,67 @@ void install_validation_patch() {
     log_line("[ValidationPatch] slot1(r=10)=%s slot2(r=6)=%s stub=0x%lx orig1=0x%lx orig2=0x%lx",
              ok1 ? "ok" : "FAIL", ok2 ? "ok" : "FAIL",
              (long)stub_va, (long)orig1, (long)orig2);
+}
+
+// ============================================================
+// KickBypass: patches vtable entries that point to
+// ClientWasKicked_Implementation, replacing them with a stub
+// that logs and suppresses the kick.
+//
+// 43.00 (build 59596594): 18 entries, all at kKickedFnOffset_4300 + i*8
+// 43.10 (build 60278837): 18 entries, scattered across __DATA_CONST
+//   Function VA 0x10865a2b8 (file off 0x865a2b8), "ClientWasKicked Reason:"
+// ============================================================
+
+// 43.00: 18 contiguous entries starting at this file offset (each +8)
+static constexpr uintptr_t kKickedFnOffset_4300 = 0x858cf18;
+static constexpr uintptr_t kKickedFn_4300       = 0x52e22b8; // fn file offset
+
+// 43.10: 18 scattered entries
+static constexpr uintptr_t kKickedFn_4310 = 0x865a2b8;
+static const uintptr_t kKickedEntries_4310[] = {
+    0xce7d390, 0xd049c60, 0xd617e00, 0xd61c758, 0xd61f558,
+    0xd625048, 0xd627c78, 0xd62ada0, 0xd62fcc8, 0xd6369e8,
+    0xd6a70f8, 0xd723c08, 0xd726da8, 0xd72a048, 0xd72d2b8,
+    0xd7692d8, 0xd7eb800, 0xd8138f8,
+};
+static constexpr size_t kKickedEntries_4310_count =
+    sizeof(kKickedEntries_4310) / sizeof(kKickedEntries_4310[0]);
+
+static void kicked_bypass_stub(void* /*self*/, void* /*reason*/) {
+    g_last_kick_suppressed_at.store(mach_absolute_time(), std::memory_order_release);
+    log_line("[KickBypass] ClientWasKicked suppressed");
+}
+
+void install_kick_bypass() {
+    const mach_header* mh = _dyld_get_image_header(0);
+    if (!mh) { log_line("[KickBypass] no image header"); return; }
+    uintptr_t base = reinterpret_cast<uintptr_t>(mh);
+
+    uint32_t build_id = read_bundle_build_id();
+    uintptr_t stub_va = reinterpret_cast<uintptr_t>(kicked_bypass_stub);
+
+    if (build_id == 59596594) {
+        // 43.00: 18 contiguous entries
+        uintptr_t fn_va = base + kKickedFn_4300;
+        int ok = 0;
+        for (int i = 0; i < 18; ++i) {
+            uintptr_t slot_va = base + kKickedFnOffset_4300 + (uintptr_t)i * 8;
+            if (patch_vtable_entry(slot_va, fn_va, stub_va)) ++ok;
+        }
+        log_line("[KickBypass] 43.00: patched %d/18", ok);
+    } else if (build_id == 60278837) {
+        // 43.10: 18 scattered entries
+        uintptr_t fn_va = base + kKickedFn_4310;
+        int ok = 0;
+        for (size_t i = 0; i < kKickedEntries_4310_count; ++i) {
+            uintptr_t slot_va = base + kKickedEntries_4310[i];
+            if (patch_vtable_entry(slot_va, fn_va, stub_va)) ++ok;
+        }
+        log_line("[KickBypass] 43.10: patched %d/%zu", ok, kKickedEntries_4310_count);
+    } else {
+        log_line("[KickBypass] version desconocida build_id=%u", build_id);
+    }
 }
 
 } // namespace fndiag

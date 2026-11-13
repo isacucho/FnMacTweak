@@ -4,6 +4,35 @@ Regla estricta: un error a la vez. No avanzar al siguiente hasta resolver y veri
 
 ---
 
+## RESUELTO (2026-11-13): IPA con estructura macOS wrapper - Sideloadly rechaza
+
+Sideloadly exige `Payload/<App>.app/Info.plist` directamente. El wrapper macOS de Fortnite
+es `Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app/` y si se empaqueta desde
+`/Applications/Fortnite.app/` como `Payload/Fortnite.app/`, Sideloadly falla con:
+"There is no item named 'Payload/Fortnite.app/Info.plist' in the archive".
+Correcto: empaquetar desde `Wrapper/FortniteClient-IOS-Shipping.app/` como
+`Payload/FortniteClient-IOS-Shipping.app/`.
+
+## RESUELTO (2026-11-13): MarketplaceKitWrapper SIGSEGV al arrancar (pc=0x0, 1s tras boot)
+
+`AppDistributorWrapper.getCurrent` en MarketplaceKitWrapper llama al stub Swift de
+`MarketplaceKit.framework` (enlazado como LC_LOAD_WEAK_DYLIB). En este macOS el framework
+no existe, el stub resuelve a NULL, el closure lo llama -> SIGSEGV. El ejecutable principal
+enlaza MarketplaceKitWrapper.framework tambien como LC_LOAD_WEAK_DYLIB.
+Fix: eliminar `Frameworks/MarketplaceKitWrapper.framework/` del bundle instalado antes de
+resignar. Incorporado en resign.sh permanentemente.
+NO parchear el binario principal: basta con que el framework no este en el bundle.
+
+## PITFALL: disk island ausente si IPA se construye antes de deploy.sh
+
+deploy.sh aplica `patch_binary.py --apply` sobre el binario instalado en
+`/Applications/Fortnite.app/Wrapper/...`. Si se reconstruye el IPA desde ese binario
+SIN haber ejecutado deploy.sh primero, el disco island no estara en el IPA.
+Sideloadly instala el binario limpio y el disk island se pierde.
+Orden correcto: deploy.sh -> resign.sh -> (si necesitas IPA) construirlo ahora.
+
+---
+
 ## RESUELTO: V2.5.0 heap scan crashea el proceso (SIGBUS + wrong thread)
 
 **V2.5.1:** `vm_read_overwrite` elimino SIGBUS en el scan. No era la causa real.

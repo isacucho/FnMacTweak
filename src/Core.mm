@@ -3,8 +3,10 @@
 #include <unistd.h>
 
 #include "core/DiagLog.hpp"
+#include "core/LogSpoofer.hpp"
 #include "core/SimulatorContext.hpp"
 #include "update/KickPatcher.hpp"
+#include "update/NetFailurePatcher.hpp"
 #include "metadata/DeviceSpoof.hpp"
 #include "eos/EosHooks.hpp"
 #include "eos/MkwBypass.hpp"
@@ -28,16 +30,22 @@ __attribute__((constructor)) static void fncompat_init() {
         BOOT_PROBE("2_sim_done");
         fndiag::log_init(container + "/Documents/FnDiag.log");
         BOOT_PROBE("3_log_init_done");
+        fndiag::write_log_key_file(container);
+        BOOT_PROBE("4_logkey_done");
 
         // ValidationPatch: suprime la deteccion sideload/JIT en vtable 0xcd32e18 y
         // 0xcd32df8. El stub devuelve 0 antes de que se active el dispatch de kick.
         installSpoofHooks();
-        BOOT_PROBE("4_spoof_done");
+        BOOT_PROBE("5_spoof_done");
         fndiag::install_validation_patch();
-        BOOT_PROBE("5_validation_done");
+        BOOT_PROBE("6_validation_done");
         install_eos_hooks();
-        BOOT_PROBE("6_eos_hooks_done");
+        BOOT_PROBE("7_eos_hooks_done");
         install_mkw_hooks();
-        BOOT_PROBE("7_mkw_hooks_done");
+        BOOT_PROBE("8_mkw_hooks_done");
+        fndiag::install_net_failure_patch();
+        BOOT_PROBE("9_netfail_done");
+        fndiag::install_kick_bypass();
+        BOOT_PROBE("10_kickbypass_done");
     }
 }

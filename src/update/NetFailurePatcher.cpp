@@ -1,20 +1,26 @@
 #include "update/NetFailurePatcher.hpp"
+#include "update/KickPatcher.hpp"
 #include "core/DiagLog.hpp"
 
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <mach/vm_map.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <libkern/OSCacheControl.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <cstdint>
 #include <cstring>
+#include <atomic>
 
 namespace fndiag {
 
 // SUB sp, sp, #0x80 - prologue of UEngine::BroadcastNetworkFailure
 static constexpr uint32_t kBnfPrologue    = 0xd10203ffU;
-// Known file offset of BNF from MachO base (Fortnite v2.0.32 / build 43)
-static constexpr uintptr_t kBnfOffset     = 0x5642c74UL;
+// Known file offset of BNF from MachO base.
+// 43.00 (build 59596594): 0x5642c74
+// 43.10 (build 60278837): 0x56c999c
+static constexpr uintptr_t kBnfOffset     = 0x56c999cUL;
 // String used to locate BNF via ADRP+ADD scan in __TEXT,__text
 static constexpr char     kBnfString[]    = "BroadcastNetworkFailure";
 // Scan budget: how far back to walk from ADRP+ADD to find function prologue
@@ -27,9 +33,61 @@ using BnfFn = void (*)(void* self, void* world, void* net_driver,
                         int32_t failure_type, void* error_string);
 static BnfFn g_orig_bnf = nullptr;
 
+// kConnectionLost=3, kConnectionTimeout=4 (confirmed from ENetworkFailure strings)
+static constexpr int32_t kConnectionLost    = 3;
+static constexpr int32_t kConnectionTimeout = 4;
+// 500ms window in nanoseconds
+static constexpr uint64_t kKickWindowNs = 500ULL * 1000000ULL;
+// 25s synthetic ConnectionTimeout delay
+static constexpr double   kSyntheticDelaySecs = 25.0;
+
+// Guards against firing the synthetic CT more than once per kick event
+static std::atomic<bool> g_synthetic_pending{false};
+
+// Convert nanoseconds to mach_absolute_time ticks
+static uint64_t ns_to_mach(uint64_t ns) {
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    return ns * tb.denom / tb.numer;
+}
+
 static void bnf_bypass_stub(void* self, void* world, void* net_driver,
                               int32_t failure_type, void* error_string) {
-    log_line("[NetFailurePatch] BNF type=%d (pass-through)", failure_type);
+    // Check if this ConnectionLost is within the kick-suppression window
+    if (failure_type == kConnectionLost) {
+        uint64_t kick_at = g_last_kick_suppressed_at.load(std::memory_order_acquire);
+        if (kick_at != 0) {
+            uint64_t now = mach_absolute_time();
+            uint64_t window_ticks = ns_to_mach(kKickWindowNs);
+            if (now >= kick_at && (now - kick_at) <= window_ticks) {
+                log_line("[NetFailurePatch] ConnectionLost suppressed (within kick window)");
+
+                // Fire synthetic ConnectionTimeout once after 25s
+                bool expected = false;
+                if (g_synthetic_pending.compare_exchange_strong(expected, true,
+                        std::memory_order_acq_rel)) {
+                    // Capture params for the dispatch block
+                    void* cap_self   = self;
+                    void* cap_world  = world;
+                    void* cap_driver = net_driver;
+                    dispatch_after(
+                        dispatch_time(DISPATCH_TIME_NOW,
+                                      (int64_t)(kSyntheticDelaySecs * NSEC_PER_SEC)),
+                        dispatch_get_main_queue(),
+                        ^{
+                            log_line("[NetFailurePatch] synthetic ConnectionTimeout firing (25s)");
+                            g_synthetic_pending.store(false, std::memory_order_release);
+                            if (g_orig_bnf)
+                                g_orig_bnf(cap_self, cap_world, cap_driver,
+                                           kConnectionTimeout, nullptr);
+                        });
+                }
+                return; // suppress this ConnectionLost
+            }
+        }
+    }
+
+    log_line("[NetFailurePatch] BNF type=%d", failure_type);
     if (g_orig_bnf) g_orig_bnf(self, world, net_driver, failure_type, error_string);
 }
 

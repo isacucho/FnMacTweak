@@ -1,6 +1,5 @@
 FW_DIR := /Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app/Frameworks
-# Installed under the V2.0.15 name because the binary's LC_LOAD_DYLIB is hardcoded to it.
-INSTALLED_NAME := FnMacKickFix-V2.0.27-dev.dylib
+INSTALLED_NAME := FnMacBypass.dylib
 
 .PHONY: all dev beta public package clean install
 
@@ -45,6 +44,7 @@ CPP_SRC := \
 MM_SRC := \
     src/Core.mm \
     src/core/OsLogInterceptor.mm \
+    src/core/LogSpoofer.mm \
     src/metadata/DeviceSpoof.mm \
     src/network/EacHooks.mm \
     src/update/EngineHooks.mm \

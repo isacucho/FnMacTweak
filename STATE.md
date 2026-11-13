@@ -1,6 +1,47 @@
 # Estado de la investigacion
 
-## Estado actual
+## Estado actual (2026-11-13, V23.7.4 - dylib nuevo compilado y firmado)
+
+**Build activo: 43.10 (60278837). IPA reconstruido desde FortniteClient-IOS-Shipping.app. Instalado con Sideloadly.**
+
+### Parches activos confirmados en log (PID 78872)
+- ValidationPatch: slot1(r=10)=ok slot2(r=6)=ok
+- EOS hooks: 8/8 OK
+- MkwBypass: 3/3 OK
+- KickBypass 43.10: 18/18 parchadas
+
+### Disk island: APLICADO (2026-11-13)
+patch_binary.py actualizado para 43.10: BNF_OFFSET=0x56c999c, 6 BL callers, ISLAND_BYTES
+con ADRP #0x12d7d (slot 0x112d7f9c0 = __bss inicio 43.10). 6/6 call sites OK.
+IPA reconstruido: `/Users/alexg/Documents/Dev/Fortnite/Fortnite-43.10-fnpatch.ipa`
+Instalar con Sideloadly. Verificar `[NetFailurePatch] disk-island found` y `slot armed` en log.
+
+Nota: SPEC y CUSTOM islands NO parchados en 43.10 (sus fn offsets cambiaron).
+BeginSpectating y CustomizationFailed sin bypass de disco. Pendiente scan para 43.10.
+
+### Fix aplicado esta sesion: MarketplaceKitWrapper crash (SIGSEGV al arrancar)
+El closure `AppDistributorWrapper.getCurrent` llama al stub de `MarketplaceKit.framework`
+(LC_LOAD_WEAK_DYLIB, no disponible en este macOS) -> puntero NULL -> pc=0x0 -> SIGSEGV 1s
+tras arranque. Fix: `rm -rf MarketplaceKitWrapper.framework` del bundle. Incorporado en
+resign.sh permanentemente (linea despues del xattr -cr).
+
+### Fixes en V23.7.4 (/Applications, 2026-11-13)
+- VERSION: 23.7.4, ARM64 iOS17.0, compilado y firmado (VersionPlatform=2, CDHash=f096996e)
+- EAC AddNotifyMessageToServer: interceptor activo - suprime tipo 0x01 (platform reports) al servidor
+- bnf_bypass_stub: suprime ConnectionLost dentro de 500ms tras kick; despacha synthetic CT a 25s
+- kicked_bypass_stub: registra timestamp g_last_kick_suppressed_at para coordinacion BNF
+- Containers: nullfs de /Applications/Wrapper - no hace falta reinstalar Sideloadly
+
+### Sin verificar en esta sesion
+- Partida BR completa sin kicks (requiere gameplay activo)
+- EAC interceptor tipo 0x01 en log real (nunca aparecio "(interceptor installed)")
+- Ghost mode / zero damage bug (requiere partida)
+- LLDB audit en proceso activo (nunca exitoso, SyntaxError corregido en tools/lldb_run_audit.sh)
+- KickBypass efectivo en partida real
+
+---
+
+## Estado anterior (V2.6.6, pre-43.10 rebuild)
 
 **V2.6.6 deployada. Fix regression V2.6.4: g_rejoin_attempted se seteaba antes del EOS probe, bloqueando el synthetic CT. Freeze 25s (V2.1.27) restaurado. Pendiente verificacion en partida.**
 

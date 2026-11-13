@@ -7,7 +7,7 @@ APP="/Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app"
 BIN="$APP/FortniteClient-IOS-Shipping"
 IDENTITY="Apple Development: alexgaro2015@icloud.com (P5273M69QW)"
 VERSION="$(cat "$(dirname "$0")/../VERSION" | tr -d '[:space:]')"
-DYLIB_NAME="FnMacKickFix-V${VERSION}-dev.dylib"
+DYLIB_NAME="FnMacBypass.dylib"
 
 echo "=== FnMac Bundle Re-Sign ==="
 echo "Bundle:   $APP"
@@ -18,6 +18,11 @@ echo ""
 # 1. Quitar xattr de provenance que bloquea escrituras
 echo "[1/4] Quitando com.apple.provenance..."
 sudo xattr -cr "$APP" 2>/dev/null || true
+
+# Eliminar MarketplaceKitWrapper: su closure llama a un stub de MarketplaceKit.framework
+# (weak import no disponible en este macOS), el puntero queda NULL -> pc=0x0 -> SIGSEGV.
+# El ejecutable principal lo carga como LC_LOAD_WEAK_DYLIB, basta con borrarlo del bundle.
+rm -rf "$APP/Frameworks/MarketplaceKitWrapper.framework" 2>/dev/null || true
 
 # 2. Re-firmar el dylib parchado primero (antes que el bundle)
 echo "[2/4] Re-firmando dylib..."

@@ -39,7 +39,7 @@ void log_line(const char* fmt, ...) {
     strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &local);
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_os) g_os = os_log_create("com.alexgrdev.fnmackickfix", "diag");
+    if (!g_os) g_os = os_log_create("com.alexgrdev.fnmacbypass", "diag");
     os_log(g_os, "%{public}s", msg);
     if (g_file) {
         fprintf(g_file, "%s.%03d [%d] %s\n",

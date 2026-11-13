@@ -4,11 +4,11 @@
 set -euo pipefail
 
 VERSION="$(cat "$(dirname "$0")/../VERSION" | tr -d '[:space:]')"
-DYLIB_SRC="$(dirname "$0")/../builds/dev/FnMacKickFix-V${VERSION}-dev.dylib"
+DYLIB_SRC="$(dirname "$0")/../builds/dev/FnMacBypass.dylib"
 APP="/Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app"
 FW_DIR="$APP/Frameworks"
 BIN="$APP/FortniteClient-IOS-Shipping"
-DYLIB_DST="$FW_DIR/FnMacKickFix-V${VERSION}-dev.dylib"
+DYLIB_DST="$FW_DIR/FnMacBypass.dylib"
 # UUID del container asignado por Sideloadly, puede cambiar al reinstalar.
 # Buscar dinamicamente: primero por FnDiag.log existente, luego por lsof si el
 # juego esta corriendo, con fallback al UUID conocido.
@@ -35,7 +35,7 @@ if [ ! -f "$DYLIB_SRC" ]; then
     exit 1
 fi
 
-echo "=== FnMac Deploy V${VERSION} ==="
+echo "=== FnMacBypass Deploy V${VERSION} ==="
 echo "Fuente: $DYLIB_SRC ($(du -h "$DYLIB_SRC" | cut -f1))"
 
 # Kill any running Fortnite process: the kernel blocks writes to a mapped executable.
@@ -89,6 +89,11 @@ fi
 # Copy to versioned destination
 echo "Copiando dylib..."
 cp "$DYLIB_SRC" "$DYLIB_DST"
+# Also keep the old name in sync while LC_LOAD_DYLIB migration is pending
+OLD_FNAME_CUR=$(otool -L "$BIN" 2>/dev/null | grep -E 'FnMac(Bypass|KickFix).*\.dylib' | awk '{print $1}' | head -1 | xargs basename 2>/dev/null)
+if [ -n "$OLD_FNAME_CUR" ] && [ "$OLD_FNAME_CUR" != "FnMacBypass.dylib" ]; then
+    cp "$DYLIB_SRC" "$FW_DIR/$OLD_FNAME_CUR"
+fi
 
 echo "Verificando checksum..."
 SRC_MD5=$(md5 -q "$DYLIB_SRC")
@@ -101,20 +106,20 @@ if [ "$SRC_MD5" != "$DST_MD5" ]; then
 fi
 echo "OK: $DST_MD5"
 
-# Update LC_LOAD_DYLIB in binary to reference the new versioned dylib.
-# The binary was originally injected by Sideloadly/insert_dylib with a versioned name.
-# Each deploy must update that name or the binary will crash on launch (dyld: Library missing).
+# Asegura que LC_LOAD_DYLIB apunte al nombre fijo FnMacBypass.dylib.
+# Si el binario tiene un nombre versionado antiguo (FnMacKickFix-V*) lo migra en un solo deploy.
 echo ""
 echo "Actualizando LC_LOAD_DYLIB del binario..."
-NEW_LC="@executable_path/Frameworks/FnMacKickFix-V${VERSION}-dev.dylib"
+NEW_LC="@rpath/FnMacBypass.dylib"
 NEW_FNAME=$(basename "$NEW_LC")
-OLD_LC=$(otool -L "$BIN" | grep 'FnMacKickFix-V.*-dev\.dylib' | awk '{print $1}' | head -1)
+# Buscar LC_LOAD_DYLIB: acepta tanto el nombre fijo nuevo como cualquier variante versionada anterior.
+OLD_LC=$(otool -L "$BIN" | grep -E 'FnMac(Bypass|KickFix).*\.dylib' | awk '{print $1}' | head -1)
 
 if [ -z "$OLD_LC" ]; then
-    echo "AVISO: no se encontro LC_LOAD_DYLIB de FnMacKickFix en el binario"
+    echo "AVISO: no se encontro LC_LOAD_DYLIB de FnMacBypass en el binario"
     echo "El binario no tiene la dylib inyectada. Reinjecta con Sideloadly antes de lanzar."
 elif [ "$OLD_LC" = "$NEW_LC" ]; then
-    echo "LC_LOAD_DYLIB ya apunta a V${VERSION}, sin cambios"
+    echo "LC_LOAD_DYLIB ya apunta a FnMacBypass.dylib, sin cambios"
 else
     OLD_FNAME=$(basename "$OLD_LC")
     echo "  $OLD_FNAME -> $NEW_FNAME"
@@ -149,12 +154,11 @@ PYEOF
     fi
 fi
 
-# Remove any other residual FnMacKickFix-V* dylibs (not the new one).
-# Multiple old versions cause duplicate hooks with broken timing channels.
-for f in "$FW_DIR"/FnMacKickFix-V*.dylib; do
+# Limpiar restos de nombres versionados anteriores (FnMacKickFix-V* y FnMacBypass-V*).
+for f in "$FW_DIR"/FnMac*.dylib; do
     [ -f "$f" ] || continue
     [ "$(basename "$f")" = "$NEW_FNAME" ] && continue
-    echo "Eliminando residual: $(basename "$f")"
+    echo "Eliminando dylib residual: $(basename "$f")"
     xattr -d com.apple.provenance "$f" 2>/dev/null || true
     rm -f "$f"
 done

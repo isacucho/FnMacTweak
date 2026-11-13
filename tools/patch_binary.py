@@ -45,8 +45,8 @@ BIN = '/Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app/Fortni
 # overwriting the ADRP with load-command data (observed: 30c10900 instead of d05f0990).
 ISLAND_FILE_OFF = 0x29c0
 ISLAND_BYTES    = bytes.fromhex(
-    'd05f0990'  # ADRP X16, #0x12BF8  (loads page 0x112BFA000 into X16)
-    '104244f9'  # LDR  X16, [X16, #0x880]  (reads *0x112BFA880, __bss DATA slot)
+    'f06b09b0'  # ADRP X16, #0x12d7d  (page 0x112d7f000)
+    '10e244f9'  # LDR  X16, [X16, #0x9c0]  (*0x112d7f9c0 __bss DATA slot)
     '500000b4'  # CBZ  X16, +8  (if slot==0 jump over BR to RET; dylib not ready)
     '00021fd6'  # BR   X16  (tail-call bypass stub with LR intact)
     'c0035fd6'  # RET  (safe fallback: slot was 0, return to original caller)
@@ -61,12 +61,12 @@ ISLAND_BYTES_OLD = bytes.fromhex('305507b0' '109e41f9' '00021fd6')
 # __bss has offset=0 in the section header -> no physical file backing.
 # The OS zero-fills it at load time; there is no byte in the binary to verify.
 # The dylib writes stub_va here at runtime via kDataSlotOff = 0x12BFA880.
-DATA_SLOT_BSS_OFF = 0x12bfa880  # runtime offset only, NOT a file offset
+DATA_SLOT_BSS_OFF = 0x12d7f9c0  # runtime offset only, NOT a file offset -- 43.10 __bss VA=0x112d7f9c0
 
 # BL patches: (file_offset, new_bytes, original_bytes)
 # Each entry changes BL BnfFn -> BL <island at 0x29c0>
 # new_bytes = old_new_bytes + 1 in imm26 (target moved +4 bytes, same 4KB page)
-BNF_OFFSET = 0x5642c74  # file offset of BnfFn (kBnfOffset in NetFailurePatcher.cpp)
+BNF_OFFSET = 0x56c999c  # file offset of BnfFn (kBnfOffset in NetFailurePatcher.cpp) -- 43.10
 
 # ---- HandleCustomizationFailed island (V2.6.9) ----
 # execHandleCustomizationFailed at file offset 0xa30b698 (STP X28,X27,[SP,#-0x50]!).
@@ -167,16 +167,16 @@ SPEC_ISLAND_BYTES = bytes.fromhex(
 SPEC_ORIG_INSN = bytes.fromhex('fd7b03a9')   # original first instruction of BeginSpectating
 SPEC_B_INSN    = bytes.fromhex('a204df14')   # B island (replacement for first instruction)
 
-BL_PATCHES = [
-    # FUNC1 ConnectionLost caller, BL at 0x100f21998
-    (0x0f21998, bytes.fromhex('0a84c397'), bytes.fromhex('b7841c95')),
-    # FUNC2 ConnectionLost caller, BL at 0x1016356dc
-    (0x16356dc, bytes.fromhex('b934a797'), bytes.fromhex('66350095')),
-    # FUNC3 ConnectionLost caller, BL at 0x105b9fb70
-    (0x05b9fb70, bytes.fromhex('948b9196'), bytes.fromhex('418cea97')),
+BL_PATCHES = [  # 43.10 -- 6 direct BL callers of BnfFn at file_off 0x56c999c
+    (0x00f2f6d4, bytes.fromhex('bb4cc397'), bytes.fromhex('b2681e95')),
+    (0x01187b28, bytes.fromhex('a6ebb997'), bytes.fromhex('9d071595')),
+    (0x01644d28, bytes.fromhex('26f7a697'), bytes.fromhex('1d130295')),
+    (0x0554dad4, bytes.fromhex('bbd3aa96'), bytes.fromhex('b2ef0594')),
+    (0x055512f0, bytes.fromhex('b4c5aa96'), bytes.fromhex('abe10594')),
+    (0x05c2d0c0, bytes.fromhex('40568f96'), bytes.fromhex('3772ea97')),
 ]
 
-# BL bytes from previous patch that pointed to old island at 0x29bc.
+# BL bytes from previous patch that pointed to old island at 0x29bc (43.00 layout).
 # Used by check_state to detect "needs migration" state.
 BL_PATCHES_OLD_ISLAND = [
     (0x0f21998, bytes.fromhex('0984c397')),
