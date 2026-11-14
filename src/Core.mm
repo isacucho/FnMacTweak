@@ -6,7 +6,6 @@
 #include "core/LogSpoofer.hpp"
 #include "core/SimulatorContext.hpp"
 #include "update/KickPatcher.hpp"
-#include "update/CustomizationPatcher.hpp"
 #include "update/Updater.hpp"
 #include "metadata/DeviceSpoof.hpp"
 #include "eos/EosHooks.hpp"
@@ -24,8 +23,10 @@
 __attribute__((constructor)) static void fncompat_init() {
     BOOT_PROBE("1_constructor_start v" MODULE_VERSION);
     @autoreleasepool {
-        const char *home = getenv("HOME");
-        std::string container = home ? home : [NSHomeDirectory() UTF8String];
+        // NSHomeDirectory() devuelve el container real del proceso iOS sideloaded
+        // (~/Library/Containers/<UUID>/Data). getenv("HOME") puede devolver el home
+        // del shell de macOS en contextos DYLD_INSERT_LIBRARIES, que es incorrecto.
+        std::string container = [NSHomeDirectory() UTF8String];
 
         iOSSimulatorContext::getInstance().emulateiOSDirectories(container);
         BOOT_PROBE("2_sim_done");
@@ -51,8 +52,6 @@ __attribute__((constructor)) static void fncompat_init() {
         BOOT_PROBE("8_mkw_hooks_done");
         fndiag::install_kick_bypass();
         BOOT_PROBE("9_kickbypass_done");
-        fndiag::install_customization_patch();
-        BOOT_PROBE("10_custompatch_done");
 
         // Updater: diferido 30s en background para no interferir con la conexion a Epic.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC),

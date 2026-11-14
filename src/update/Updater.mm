@@ -2,7 +2,6 @@
 #import "core/Logger.hpp"
 #import <Foundation/Foundation.h>
 #import <CommonCrypto/CommonDigest.h>
-#include <dlfcn.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cstdio>
@@ -135,35 +134,27 @@ std::string Updater::sha256OfFile(NSString* path) {
 }
 
 bool Updater::applyUpdate(const std::string& newDylibPath) {
-    Dl_info info;
-    if (dladdr((const void*)&Updater::getInstance, &info) == 0 || !info.dli_fname) {
-        LOG_E(TAG, "No se pudo determinar la ruta de la dylib actual."); return false;
-    }
-    std::string current = info.dli_fname;
-    std::string staged  = current + ".new";
-    std::string backup  = current + ".bak";
-    LOG_I(TAG, "Reemplazando dylib en: %s", current.c_str());
+    // Frameworks/ dentro del .app bundle no es escribible desde el proceso (macl post-ejecucion).
+    // Guardamos el update en el container writable; el usuario lo aplica con deploy.sh.
+    NSString* docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+    std::string stagePath = [docs UTF8String];
+    stagePath += "/FnMacBypass-update.dylib";
 
     NSFileManager* fm  = [NSFileManager defaultManager];
-    NSString* stagedNS  = [NSString stringWithUTF8String:staged.c_str()];
-    NSString* backupNS  = [NSString stringWithUTF8String:backup.c_str()];
-    NSString* currentNS = [NSString stringWithUTF8String:current.c_str()];
-    [fm removeItemAtPath:stagedNS error:nil];
-    [fm removeItemAtPath:backupNS error:nil];
+    NSString* stageNS  = [NSString stringWithUTF8String:stagePath.c_str()];
+    [fm removeItemAtPath:stageNS error:nil];
 
     NSError* err = nil;
-    if (![fm copyItemAtPath:[NSString stringWithUTF8String:newDylibPath.c_str()] toPath:stagedNS error:&err] ||
-        ![fm copyItemAtPath:currentNS toPath:backupNS error:&err]) {
-        LOG_E(TAG, "No se pudo preparar la actualizacion: %s", [[err localizedDescription] UTF8String]);
-        [fm removeItemAtPath:stagedNS error:nil];
+    if (![fm copyItemAtPath:[NSString stringWithUTF8String:newDylibPath.c_str()]
+                    toPath:stageNS
+                     error:&err]) {
+        LOG_E(TAG, "No se pudo copiar update al container: %s", [[err localizedDescription] UTF8String]);
         return false;
     }
-    chmod(staged.c_str(), 0755);
-    if (rename(staged.c_str(), current.c_str()) != 0) {
-        LOG_E(TAG, "rename fallo (errno %d). Dylib actual intacta.", errno);
-        [fm removeItemAtPath:stagedNS error:nil];
-        return false;
-    }
+    chmod(stagePath.c_str(), 0755);
+    LOG_I(TAG, "Update guardado en: %s", stagePath.c_str());
+    LOG_I(TAG, "Para aplicar: cp '%s' <Frameworks>/FnMacBypass.dylib && bash tools/resign.sh",
+          stagePath.c_str());
     return true;
 }
 

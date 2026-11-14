@@ -26,7 +26,7 @@ public:
         std::string pdd     = game + "/PersistentDownloadDir";
         std::string chunk   = pdd  + "/ChunkDownload";
         std::string bghttp  = pdd  + "/BackgroundHttp";
-        std::string ver     = bghttp + "/++Fortnite+Release-43.00";
+        std::string ver     = bghttp + "/++Fortnite+Release-43.10";
 
         bool ok = true;
         ok &= mkDir(docs);

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 VERSION="$(cat "$(dirname "$0")/../VERSION" | tr -d '[:space:]')"
-DYLIB_SRC="$(dirname "$0")/../builds/dev/FnMacBypass.dylib"
+DYLIB_SRC="$(dirname "$0")/../builds/dev/FnMacBypass-V${VERSION}-dev.dylib"
 APP="/Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app"
 FW_DIR="$APP/Frameworks"
 BIN="$APP/FortniteClient-IOS-Shipping"
@@ -22,7 +22,7 @@ _discover_container_log() {
         f=$(lsof -p "$pid" 2>/dev/null | awk '$NF~/FnDiag\.log/{print $NF}' | head -1)
         [ -n "$f" ] && echo "$f" && return
     fi
-    echo "$HOME/Library/Containers/0F16E856-1C80-4448-9C65-ED3A8E8DA5E9/Data/Documents/FnDiag.log"
+    echo "$HOME/Library/Containers/0F0EC711-45C9-40C0-B03A-BEDA3F502B4A/Data/Documents/FnDiag.log"
 }
 LOG=$(_discover_container_log)
 
