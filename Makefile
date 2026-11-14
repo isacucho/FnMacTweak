@@ -61,7 +61,8 @@ MM_SRC := \
     src/metadata/DeviceSpoof.mm \
     src/update/EngineHooks.mm \
     src/update/Updater.mm \
-    src/input/InputProbe.mm
+    src/input/InputProbe.mm \
+    src/network/StatusCodeFix.mm
 
 HEADERS := $(shell find include -name '*.hpp')
 
