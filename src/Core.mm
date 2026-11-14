@@ -12,6 +12,7 @@
 #include "eos/MkwBypass.hpp"
 #include "network/StatusCodeFix.hpp"
 #include "update/UpdateHooks.hpp"
+#include "update/CustomizationPatcher.hpp"
 
 #ifndef MODULE_VERSION
 #define MODULE_VERSION "1.0.0"
@@ -53,6 +54,8 @@ __attribute__((constructor)) static void fncompat_init() {
         BOOT_PROBE("10_mkw_hooks_done");
         fndiag::install_kick_bypass();
         BOOT_PROBE("11_kickbypass_done");
+        fndiag::install_customization_patch();
+        BOOT_PROBE("12_custompatch_done");
 
         // Updater: diferido 30s en background para no interferir con la conexion a Epic.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC),

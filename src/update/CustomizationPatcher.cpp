@@ -16,7 +16,7 @@ namespace {
 // reason=144 kicks. ARM64 ABI: ignores all arguments, void return.
 static void __attribute__((noinline, used)) customization_failed_stub() {}
 
-// Find a C string needle in __TEXT,__cstring; return its runtime VA or 0.
+// Find a C string needle in any __TEXT section; return its runtime VA or 0.
 static uintptr_t find_cstring_va(const mach_header_64* mh, uintptr_t slide,
                                   const char* needle) {
     size_t nlen = strlen(needle);
@@ -28,7 +28,6 @@ static uintptr_t find_cstring_va(const mach_header_64* mh, uintptr_t slide,
             if (strncmp(seg->segname, "__TEXT", 16) == 0) {
                 const section_64* sec = reinterpret_cast<const section_64*>(seg + 1);
                 for (uint32_t j = 0; j < seg->nsects; ++j, ++sec) {
-                    if (strncmp(sec->sectname, "__cstring", 16) != 0) continue;
                     uintptr_t start = sec->addr + slide;
                     uintptr_t end   = start + sec->size;
                     for (uintptr_t a = start; a + nlen < end; ++a) {
@@ -44,75 +43,83 @@ static uintptr_t find_cstring_va(const mach_header_64* mh, uintptr_t slide,
     return 0;
 }
 
-// Scan __TEXT,__text for ADRP+ADD pair that loads str_va, then walk back
-// to the nearest function entry matching fn_prologue. Returns 0 on failure.
+// Scan all __TEXT executable sections for ADRP+ADD pair loading str_va,
+// then walk back to the nearest function entry (any STP pre-index or SUB SP).
+// Returns 0 on failure.
 static uintptr_t find_fn_via_string(const mach_header_64* mh, uintptr_t slide,
-                                     uintptr_t str_va, uint32_t fn_prologue) {
-    // Find __TEXT,__text section
-    uintptr_t text_start = 0;
-    size_t    text_size  = 0;
+                                     uintptr_t str_va, uint32_t /*fn_prologue*/) {
+    uintptr_t str_page = str_va & ~0xFFFULL;
+    uint32_t  str_off  = static_cast<uint32_t>(str_va & 0xFFF);
+
     const uint8_t* p = reinterpret_cast<const uint8_t*>(mh) + sizeof(mach_header_64);
     for (uint32_t i = 0; i < mh->ncmds; ++i) {
         const load_command* lc = reinterpret_cast<const load_command*>(p);
         if (lc->cmd == LC_SEGMENT_64) {
             const segment_command_64* seg = reinterpret_cast<const segment_command_64*>(lc);
             if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                uintptr_t seg_va   = seg->vmaddr + slide;
+                uintptr_t seg_end  = seg_va + seg->vmsize;
+                // Scan all sections in __TEXT that look like code (align >= 2)
                 const section_64* sec = reinterpret_cast<const section_64*>(seg + 1);
                 for (uint32_t j = 0; j < seg->nsects; ++j, ++sec) {
-                    if (strncmp(sec->sectname, "__text", 16) == 0) {
-                        text_start = sec->addr + slide;
-                        text_size  = static_cast<size_t>(sec->size);
-                        break;
+                    if (sec->size < 8) continue;
+                    // Skip pure-data sections (strings, unwind, etc.)
+                    uint32_t stype = sec->flags & 0xFF;
+                    if (stype != 0x00 && stype != 0x08 && stype != 0x0A) continue;
+                    uintptr_t sect_start = sec->addr + slide;
+                    uintptr_t sect_end   = sect_start + sec->size;
+                    if (sect_end > seg_end) sect_end = seg_end;
+
+                    for (uintptr_t pc = sect_start; pc + 8 <= sect_end; pc += 4) {
+                        const uint32_t insn = *reinterpret_cast<const volatile uint32_t*>(pc);
+                        if ((insn & 0x9F000000U) != 0x90000000U) continue;
+
+                        uint8_t  rd    = insn & 0x1FU;
+                        uint32_t immhi = (insn >> 5) & 0x7FFFFU;
+                        uint32_t immlo = (insn >> 29) & 0x3U;
+                        int64_t  imm21 = static_cast<int64_t>(
+                                            static_cast<int32_t>(((immhi << 2) | immlo) << 11)) >> 11;
+                        uintptr_t adrp_res = (pc & ~0xFFFULL) + (imm21 << 12);
+                        if (adrp_res != str_page) continue;
+
+                        // ADD Xd, Xrd, #str_off or LDR Xd,[Xrd,#str_off*8]
+                        bool ref_found = false;
+                        for (uintptr_t la = pc + 4; la <= pc + 16 && la + 4 <= sect_end; la += 4) {
+                            const uint32_t nx = *reinterpret_cast<const volatile uint32_t*>(la);
+                            // ADD (imm, 64-bit, no shift)
+                            if ((nx >> 22) == 0x244U &&
+                                ((nx >> 5) & 0x1FU) == rd &&
+                                ((nx >> 10) & 0xFFFU) == str_off) { ref_found = true; break; }
+                            // LDR (unsigned offset, 64-bit) scaled by 8
+                            if ((nx & 0xFFC00000U) == 0xF9400000U &&
+                                ((nx >> 5) & 0x1FU) == rd &&
+                                ((nx >> 10) & 0xFFFU) * 8 == str_off) { ref_found = true; break; }
+                        }
+                        if (!ref_found) continue;
+
+                        log_line("[CustomPatch] ADRP hit @ 0x%lx sect=%.*s -- scanning for fn entry",
+                                 (long)(pc - slide + 0x100000000ULL), 16, sec->sectname);
+
+                        // Walk back up to 128KB for any function entry pattern
+                        uintptr_t back  = pc & ~0xFULL;
+                        uintptr_t limit = (back > 0x20000U) ? (back - 0x20000U) : sect_start;
+                        for (; back >= limit; back -= 4) {
+                            const uint32_t pro = *reinterpret_cast<const volatile uint32_t*>(back);
+                            // STP (pre-index, 64-bit): bits[31:23] = 101001011 = 0x135
+                            bool is_stp_preidx = (pro >> 23) == 0x135U;
+                            // SUB SP, SP, #N: bits[31:22]=1101000100, bits[4:0]=11111
+                            // mask bits[31:22] = 0xFFC00000, pattern 0xD1000000; bits[4:0]=0x1F
+                            bool is_sub_sp = ((pro & 0xFFC0001FU) == 0xD100001FU);
+                            if (is_stp_preidx || is_sub_sp) return back;
+                            if (back == sect_start) break;
+                        }
+                        log_line("[CustomPatch] ADRP hit @ 0x%lx but no fn entry found in walkback",
+                                 (long)(pc - slide + 0x100000000ULL));
                     }
                 }
-                if (!text_start) {
-                    text_start = seg->vmaddr + slide;
-                    text_size  = static_cast<size_t>(seg->vmsize);
-                }
-                break;
             }
         }
         p += lc->cmdsize;
-    }
-    if (!text_start) return 0;
-
-    uintptr_t str_page = str_va & ~0xFFFULL;
-    uint32_t  str_off  = static_cast<uint32_t>(str_va & 0xFFF);
-    uintptr_t text_end = text_start + text_size;
-
-    for (uintptr_t pc = text_start; pc + 8 <= text_end; pc += 4) {
-        const uint32_t insn = *reinterpret_cast<const volatile uint32_t*>(pc);
-        // ADRP
-        if ((insn & 0x9F000000U) != 0x90000000U) continue;
-
-        uint8_t  rd    = insn & 0x1FU;
-        uint32_t immhi = (insn >> 5) & 0x7FFFFU;
-        uint32_t immlo = (insn >> 29) & 0x3U;
-        int64_t  imm21 = static_cast<int64_t>(
-                             static_cast<int32_t>(((immhi << 2) | immlo) << 11)) >> 11;
-        uintptr_t adrp_res = (pc & ~0xFFFULL) + (imm21 << 12);
-        if (adrp_res != str_page) continue;
-
-        // ADD Xd, Xrd, #str_off (look 1-4 insns ahead)
-        bool add_found = false;
-        for (uintptr_t la = pc + 4; la <= pc + 16 && la + 4 <= text_end; la += 4) {
-            const uint32_t nx = *reinterpret_cast<const volatile uint32_t*>(la);
-            if ((nx >> 22) != 0x244U) continue;
-            if (((nx >> 5) & 0x1FU) != rd) continue;
-            if (((nx >> 10) & 0xFFFU) != str_off) continue;
-            add_found = true;
-            break;
-        }
-        if (!add_found) continue;
-
-        // Walk back up to 32KB for fn_prologue
-        uintptr_t back  = pc & ~0xFULL;
-        uintptr_t limit = (back > 0x8000U) ? (back - 0x8000U) : text_start;
-        for (; back >= limit; back -= 4) {
-            if (*reinterpret_cast<const volatile uint32_t*>(back) == fn_prologue)
-                return back;
-            if (back == text_start) break;
-        }
     }
     return 0;
 }
@@ -182,25 +189,28 @@ void install_customization_patch() {
         }
     }
 
-    // 2. String-anchor scan: "execHandleCustomizationFailed" (UFunction name in __cstring).
+    // 2. String-anchor scan: "HandleCustomizationFailed" (UFunction name in __cstring).
     // MSHookFunction on __TEXT is blocked by AMFI; this path finds the function dynamically
     // so we can do a __DATA_CONST vtable swap instead.
+    // Note: in UE5 build 43.10 the string is in __cstring but not referenced via
+    // ADRP+ADD in __text; the ADRP hit may appear in __init_offsets functions.
     if (!fn_va) {
-        uintptr_t str_va = find_cstring_va(mh, slide, "execHandleCustomizationFailed");
+        uintptr_t str_va = find_cstring_va(mh, slide, "HandleCustomizationFailed");
         if (str_va) {
+            log_line("[CustomPatch] string 'HandleCustomizationFailed' at 0x%lx", (long)str_va);
             fn_va = find_fn_via_string(mh, slide, str_va, kCustomFnPrologue);
             if (fn_va)
                 log_line("[CustomPatch] fn via string scan 0x%lx", (long)fn_va);
             else
-                log_line("[CustomPatch] string found but fn prologue not found in walkback");
+                log_line("[CustomPatch] string found but no ADRP hit in any __TEXT section -- "
+                         "string may only be in UE5 reflection metadata, not referenced in code");
         } else {
-            log_line("[CustomPatch] 'execHandleCustomizationFailed' not in __cstring");
+            log_line("[CustomPatch] 'HandleCustomizationFailed' not found in __TEXT");
         }
     }
 
     if (!fn_va) {
-        log_line("[CustomPatch] FAIL: could not locate execHandleCustomizationFailed -- "
-                 "ContentPatch (HTTP layer) still active");
+        log_line("[CustomPatch] FAIL: could not locate HandleCustomizationFailed");
         return;
     }
 
