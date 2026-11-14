@@ -34,7 +34,11 @@ typedef void (*EOS_Sessions_OnEndSessionCallback)(const void*);
 typedef struct { int32_t ApiVersion; const char* SessionName; } EOS_Sessions_DestroySessionOptions;
 typedef void (*EOS_Sessions_OnDestroySessionCallback)(const void*);
 
-typedef void*   EOS_HPlatform;
+typedef void*    EOS_HPlatform;
+typedef int32_t  EOS_Application_Status;
+static const EOS_Application_Status EOS_AS_BackgroundSuspended = 2;
+static const EOS_Application_Status EOS_AS_Foreground          = 3;
+typedef EOS_EResult (*fn_SetAppStatus)(EOS_HPlatform, EOS_Application_Status);
 typedef void* (*fn_GetACClientIface)(EOS_HPlatform);
 typedef EOS_EResult (*fn_BeginSession)(EOS_HAntiCheatClient, const EOS_AntiCheatClient_BeginSessionOptions*);
 typedef EOS_EResult (*fn_GetSysReq)(EOS_HAntiCheatClient, const EOS_AntiCheatClient_GetSystemRequirementStatusOptions*, int32_t*, int32_t*);
@@ -48,6 +52,7 @@ typedef void (*EOS_AntiCheatClient_OnMessageToServerCallback)(const void*, const
 typedef struct { int32_t ApiVersion; EOS_AntiCheatClient_OnMessageToServerCallback NotificationFn; void* ClientData; } EOS_AntiCheatClient_AddNotifyMessageToServerOptions;
 typedef EOS_EResult (*fn_AddNotifyMsgToServer)(EOS_HAntiCheatClient, const EOS_AntiCheatClient_AddNotifyMessageToServerOptions*);
 
+static fn_SetAppStatus     orig_SetAppStatus     = nullptr;
 static fn_GetACClientIface orig_GetACClientIface = nullptr;
 static fn_AddNotifyMsgToServer orig_AddNotifyMsgToServer = nullptr;
 static fn_BeginSession  orig_BeginSession  = nullptr;
@@ -56,6 +61,15 @@ static fn_PollStatus    orig_PollStatus    = nullptr;
 static fn_EndSession    orig_EndSession    = nullptr;
 static fn_DestroySession orig_DestroySession = nullptr;
 static fn_RecvMsg       orig_RecvMsg       = nullptr;
+
+static EOS_EResult my_SetApplicationStatus(EOS_HPlatform Handle, EOS_Application_Status Status)
+{
+    if (Status == EOS_AS_BackgroundSuspended) {
+        fndiag::log_line("[EOS] SetApplicationStatus BackgroundSuspended -> Foreground (bypass)");
+        Status = EOS_AS_Foreground;
+    }
+    return orig_SetAppStatus ? orig_SetAppStatus(Handle, Status) : EOS_Success;
+}
 
 static void* my_GetACClientIface(EOS_HPlatform Handle)
 {
@@ -220,6 +234,7 @@ void install_eos_hooks() {
     }
 
     struct { const char* sym; void* replace; void** orig; } hooks[] = {
+        { "EOS_Platform_SetApplicationStatus",            (void*)my_SetApplicationStatus,      (void**)&orig_SetAppStatus              },
         { "EOS_Platform_GetAntiCheatClientInterface",     (void*)my_GetACClientIface,          (void**)&orig_GetACClientIface          },
         { "EOS_AntiCheatClient_AddNotifyMessageToServer", (void*)my_AddNotifyMsgToServer,      (void**)&orig_AddNotifyMsgToServer      },
         { "EOS_AntiCheatClient_BeginSession",             (void*)my_BeginSession,              (void**)&orig_BeginSession  },
