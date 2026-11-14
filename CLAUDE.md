@@ -1,139 +1,129 @@
-# CLAUDE.md - Instrucciones operativas para este repo
+# CLAUDE.md - Operational instructions for this repo
 
-## Compilacion
+## Build
 
-Build de desarrollo (con diagnosticos):
+Development build (with diagnostics):
 ```bash
 cd /Users/alexg/Documents/Dev/Fortnite/FnMac/FnMacUpdateFix
 make DEV=1
-# salida: builds/dev/FnMacKickFix-V<version>-dev.dylib
+# output: builds/dev/FnMacBypass-V<version>-dev.dylib
 ```
 
-Build de produccion:
+Production build:
 ```bash
-make PRODUCTION=1
+make public
 ```
 
-Limpiar y recompilar:
+Clean and rebuild:
 ```bash
 make clean && make DEV=1
 ```
 
-Resign y deploy (scripts no trackeados):
-```bash
-bash tools/resign.sh   # firma ad-hoc la dylib
-bash tools/deploy.sh   # copia y reinicia Fortnite con DYLD_INSERT_LIBRARIES
-```
-
-## Verificar build
+## Verify build
 
 ```bash
-# Comprobar que los simbolos de hook estan presentes
-nm -g builds/dev/FnMacKickFix-V*.dylib | grep -E "hook_|install_|my_"
+# Check that hook symbols are present
+nm -g builds/dev/FnMacBypass-V*.dylib | grep -E "hook_|install_|my_"
 
-# Comprobar seccion __interpose (DYLD_INTERPOSE de EosHooks)
-otool -s __DATA __interpose builds/dev/FnMacKickFix-V*.dylib
+# Check __interpose section (DYLD_INTERPOSE from EosHooks)
+otool -s __DATA __interpose builds/dev/FnMacBypass-V*.dylib
 
-# Comprobar arquitectura ARM64
-file builds/dev/FnMacKickFix-V*.dylib
+# Check ARM64 architecture
+file builds/dev/FnMacBypass-V*.dylib
 ```
 
-## Versionado (X.Y.Z)
+## Versioning (X.Y.Z)
 
-Esquema alineado con la version oficial de Fortnite iOS:
+Scheme aligned with the official Fortnite iOS version:
 
-- X: major de la version oficial de Fortnite iOS (ej. 23 para Fortnite 23.0.0)
-  Cambia cuando se actualiza el target de Fortnite (nueva IPA base).
-- Y: nueva feature en la dylib (hook nuevo, nuevo subsistema, nuevo modulo)
-  Acumulado desde la IPA base 42.40.1.
-- Z: bugfix / ajuste de comportamiento existente en la dylib
+- X: major version of official Fortnite iOS (e.g. 23 for Fortnite 23.0.0).
+  Changes when the Fortnite target is updated (new base IPA).
+- Y: new feature in the dylib (new hook, new subsystem, new module).
+  Accumulated since base IPA 42.40.1.
+- Z: bugfix / behavior adjustment in existing dylib functionality.
 
 IPA: `Fortnite-[X].0.0-V[X].[Y].[Z]-min.ipa`
-Dylib: `FnMacKickFix-V[X].[Y].[Z].dylib`
+Dylib: `FnMacBypass-V[X].[Y].[Z].dylib`
 
-Actual en VERSION: `23.6.9`  (Fortnite 23.0.0, 6 features, 9 patches desde 42.40.1)
+Current in VERSION: `23.8.1` (Fortnite 23.0.0, 8 features, 1 patch since 42.40.1)
 
-## Log de diagnostico
+## Diagnostic log
 
-El log vive en (UUID puede cambiar si se reinstala via Sideloadly):
+Log lives at (UUID may change if reinstalled via Sideloadly):
 `~/Library/Containers/0F16E856-1C80-4448-9C65-ED3A8E8DA5E9/Data/Documents/FnDiag.log`
 
-Si cambia el UUID, encontrarlo con:
+If the UUID changes, find it with:
 ```bash
 lsof -p $(pgrep FortniteClient | head -1) 2>/dev/null | grep FnDiag.log | awk '{print $NF}'
 ```
 
-Seguimiento en tiempo real:
+Real-time follow:
 ```bash
-tail -f ~/Library/Containers/0F16E856-1C80-4448-9C65-ED3A8E8DA5E9/Data/Documents/FnDiag.log | grep -E "NetFailurePatch|KickBypass|KickPatch|BNF|slot|armed"
+tail -f ~/Library/Containers/0F16E856-1C80-4448-9C65-ED3A8E8DA5E9/Data/Documents/FnDiag.log | grep -E "KickBypass|CompatReport|NmtPatch|slot|armed"
 ```
 
-Subsistema OSLog (NetHook, EAC-Auth): `com.alexgrdev.fnmackickfix`.
+OSLog subsystem: `com.alexgrdev.fnmackickfix`.
 
-Filtrar en tiempo real:
+Stream in real time:
 ```bash
 log stream --predicate 'subsystem == "com.alexgrdev.fnmackickfix"' --level debug
 ```
 
-Leer log de sesion actual:
+Read current session log:
 ```bash
 log show --predicate 'subsystem == "com.alexgrdev.fnmackickfix"' \
-  --start "2026-11-08 17:34:00" --end "2026-11-08 17:37:00" --style compact
+  --start "2026-11-15 00:00:00" --end "2026-11-15 01:00:00" --style compact
 ```
 
-## Puntos de ruptura LLDB criticos
+## Critical LLDB breakpoints
 
-Adjuntar al proceso Fortnite (PID variable):
+Attach to Fortnite process (variable PID):
 ```bash
 lldb -p $(pgrep FortniteClient-IOS)
 ```
 
-Breakpoints utiles:
+Useful breakpoints:
 ```
-# Trigger de performance que causa el kick
-(lldb) rb LogFortPerformance.*NumLoadCustomizationFailed
-
-# Entrada/salida de ClientWasKicked (cubre reasons 1/3/5 ya parcheados)
+# ClientWasKicked entry (all reasons, covered by KickBypass)
 (lldb) b ClientWasKicked_Implementation
 
-# Respuesta HTTP para diagnosticar el 400 en experience_br
+# HTTP response for diagnosing experience_br
 (lldb) b -[NSURLSessionTask _didFinishWithResponse:data:error:]
 ```
 
-Dump de memoria en la region de vtable parchada:
+Memory dump in patched vtable region:
 ```bash
-(lldb) x/32xg 0x1089f8f18   # orig vtable, ajustar con ASLR slide
+(lldb) x/32xg 0x1089f8f18   # orig vtable, adjust for ASLR slide
 ```
 
-## Offsets v2.0.32 (slide 0x46c000, base 0x10046c000)
+## Offsets v23.8.1 (slide 0x46c000, base 0x10046c000)
 
-| Simbolo | Offset desde base | Notas |
+| Symbol | Offset from base | Notes |
 |---|---|---|
-| KickBypass vtable | 0x1089f8f18 (orig) | 18 entradas parchadas |
-| KickBypass stub | 0x113da5720 | Reemplaza las 18 entradas |
+| KickBypass fn | 0x865a2b8 | ClientWasKicked_Implementation |
+| KickBypass vtable[0] | 0xce7d390 | First of 18 patched entries |
 | NmtPatch chain | 0x10c73ff10 | seg __DATA_CONST |
 
-Recalcular con slide actual:
+Recalculate with current slide:
 ```bash
-# Leer slide del log de inicio (linea ~47):
+# Read slide from startup log (~line 47):
 # [KickBypass] vtable patch: 18/18 entries patched slide=0x46c000
 ```
 
-## Archivos clave
+## Key files
 
-| Archivo | Proposito |
+| File | Purpose |
 |---|---|
-| `src/Core.mm` | Constructor dylib, orden de instalacion de hooks |
-| `src/update/NetworkHooks.mm` | NSURLSession hooks, verify/event injection |
-| `src/eos/EosHooks.cpp` | DYLD_INTERPOSE sobre EOSSDK, GetSystemRequirementStatus |
-| `include/update/KickPatcher.hpp` | Vtable patcher para ClientWasKicked |
-| `include/update/NmtPatcher.hpp` | Chain patcher para NMT en __DATA_CONST |
-| `include/network/EacHooks.hpp` | EAC auth header logging |
-| `src/core/GameLogMirror.cpp` | Espejo de LogGameLog |
+| `src/Core.mm` | Dylib constructor, hook installation order |
+| `src/eos/EosHooks.cpp` | DYLD_INTERPOSE over EOSSDK, GetSystemRequirementStatus |
+| `src/eos/CompatReport.cpp` | Vtable fingerprint scan, type=10 and flag=1 bypass |
+| `src/update/KickPatcher.cpp` | Vtable patcher for ClientWasKicked (43.10 only) |
+| `include/update/NmtPatcher.hpp` | Chain patcher for NMT in __DATA_CONST |
+| `src/core/GameLogMirror.cpp` | LogGameLog mirror |
 | `src/metadata/DeviceSpoof.mm` | iPad14,3 / iOS 17.5 User-Agent spoof |
 
-## Reglas de edicion
+## Editing rules
 
-- Cambio parcial = Edit (lineas concretas). Write completo solo para archivos nuevos.
-- No usar Write para sobrescribir un archivo existente si solo cambia una funcion.
-- Un error en PITFALLS.md a la vez. No marcar resuelto sin sesion de juego verificada.
+- Partial change = Edit (specific lines). Full Write only for new files.
+- Do not use Write to overwrite an existing file if only one function changes.
+- One issue in PITFALLS.md at a time. Do not mark resolved without an in-game session verified.

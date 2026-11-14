@@ -1,43 +1,43 @@
-# Configuracion
+# Configuration
 
-FnMacCompatLayer carga su configuracion en orden de precedencia (el ultimo gana):
+FnMacUpdateFix loads its configuration in precedence order (last wins):
 
-1. `<directorio_dylib>/FnDiag.conf`
+1. `<dylib_directory>/FnDiag.conf`
 2. `$HOME/Documents/FnDiag.conf`
-3. Variables de entorno `FNDIAG_*`
+3. Environment variables `FNDIAG_*`
 
-## Formato del fichero de configuracion
+## Config file format
 
 ```
-# comentario
-clave=valor
+# comment
+key=value
 ```
 
-Valores booleanos: `1`, `true`, `on` / `0`, `false`, `off` (insensible a mayusculas).
+Boolean values: `1`, `true`, `on` / `0`, `false`, `off` (case-insensitive).
 
 ## Flags
 
-| Clave            | Env var                    | Tipo    | Por defecto | Descripcion |
-|------------------|----------------------------|---------|-------------|-------------|
-| foreground       | FNDIAG_FOREGROUND          | bool    | false       | Sustituye background sessions por ephemeral (en proceso) |
-| isolate_sessions | FNDIAG_ISOLATE_SESSIONS    | bool    | false       | Anade UUID del container al identificador de sesion background |
-| create_dirs      | FNDIAG_CREATE_DIRS         | bool    | false       | Crea directorios padre de destino en movimientos de fichero |
-| relative_paths   | FNDIAG_RELATIVE_PATHS      | bool    | false       | Convierte rutas absolutas de FBackgroundNSURLSession a relativas |
-| patch_status     | FNDIAG_PATCH_STATUS        | bool    | false       | Parchea codigo HTTP 201 -> 200 en GetDownloadResult |
-| verbose          | FNDIAG_VERBOSE             | bool    | false       | Log detallado de todas las descargas NSURLSession |
-| trace_files      | FNDIAG_TRACE_FILES         | bool    | false       | Traza operaciones de fichero (stat, open, move, copy) en BackgroundHttp |
-| probe_input      | FNDIAG_PROBE_INPUT         | bool    | false       | Detecta teclado/raton/mandos al inicio y en conexion/desconexion |
-| input_ini        | FNDIAG_INPUT_INI           | bool    | false       | Escribe Input.ini con configuracion de raton para Fortnite |
-| native_kbm       | FNDIAG_NATIVE_KBM          | bool    | false       | Escanea __TEXT/__text buscando el predicado KBM del motor |
-| unlock_fps       | FNDIAG_UNLOCK_FPS          | bool    | false       | Fuerza la tasa de frames al valor de fps_target |
-| fps_target       | FNDIAG_FPS_TARGET          | int     | 60          | FPS objetivo para unlock_fps (rango: 30-240) |
-| mirror_log       | FNDIAG_MIRROR_LOG          | bool    | false       | Espeja FortniteGame.log en FnDiag.log con filtrado de eventos clave |
-| autoupdate       | FNDIAG_AUTOUPDATE          | bool    | false       | Comprueba y descarga actualizaciones desde GitHub Releases |
+| Key              | Env var                    | Type    | Default | Description |
+|------------------|----------------------------|---------|---------|-------------|
+| foreground       | FNDIAG_FOREGROUND          | bool    | false   | Replace background sessions with ephemeral (in-process) |
+| isolate_sessions | FNDIAG_ISOLATE_SESSIONS    | bool    | false   | Append container UUID to background session identifier |
+| create_dirs      | FNDIAG_CREATE_DIRS         | bool    | false   | Create parent directories on file move operations |
+| relative_paths   | FNDIAG_RELATIVE_PATHS      | bool    | false   | Convert FBackgroundNSURLSession absolute paths to relative |
+| patch_status     | FNDIAG_PATCH_STATUS        | bool    | false   | Patch HTTP 201 -> 200 in GetDownloadResult |
+| verbose          | FNDIAG_VERBOSE             | bool    | false   | Detailed log of all NSURLSession downloads |
+| trace_files      | FNDIAG_TRACE_FILES         | bool    | false   | Trace file operations (stat, open, move, copy) in BackgroundHttp |
+| probe_input      | FNDIAG_PROBE_INPUT         | bool    | false   | Detect keyboard/mouse/gamepads at startup and on connect/disconnect |
+| input_ini        | FNDIAG_INPUT_INI           | bool    | false   | Write Input.ini with mouse configuration for Fortnite |
+| native_kbm       | FNDIAG_NATIVE_KBM          | bool    | false   | Scan __TEXT/__text for the engine KBM predicate |
+| unlock_fps       | FNDIAG_UNLOCK_FPS          | bool    | false   | Force frame rate to fps_target value |
+| fps_target       | FNDIAG_FPS_TARGET          | int     | 60      | Target FPS for unlock_fps (range: 30-240) |
+| mirror_log       | FNDIAG_MIRROR_LOG          | bool    | false   | Mirror FortniteGame.log to FnDiag.log with key event filtering |
+| autoupdate       | FNDIAG_AUTOUPDATE          | bool    | false   | Check and download updates from GitHub Releases |
 
-## Ejemplo de configuracion para desarrollo
+## Development config example
 
 ```
-# FnDiag.conf — entorno de desarrollo
+# FnDiag.conf -- development
 verbose=true
 trace_files=true
 probe_input=true
@@ -49,26 +49,25 @@ unlock_fps=true
 fps_target=120
 ```
 
-## Ejemplo de configuracion para uso normal
+## Normal use config example
 
 ```
-# FnDiag.conf — uso en produccion
+# FnDiag.conf -- production
 relative_paths=true
 patch_status=true
 create_dirs=true
 ```
 
-## Canales de build y flags de compilacion
+## Build channels and compile flags
 
-| Canal  | CHANNEL=  | Optimizacion | PRODUCTION | Salida          |
-|--------|-----------|--------------|------------|-----------------|
-| dev    | dev       | -O0          | no         | builds/dev/     |
-| beta   | beta      | -O2          | no         | builds/beta/    |
-| public | public    | -O2          | si         | builds/public/  |
+| Channel | CHANNEL= | Optimization | PRODUCTION | Output         |
+|---------|----------|--------------|------------|----------------|
+| dev     | dev      | -O0          | no         | builds/dev/    |
+| beta    | beta     | -O2          | no         | builds/beta/   |
+| rc      | rc       | -O3          | yes        | builds/rc/     |
+| public  | public   | -O3          | yes        | builds/public/ |
 
-Con `PRODUCTION` definido:
-- Logger silencia LOG_D y LOG_I (solo LOG_W y LOG_E activos)
-- dumpPayload en EacHooks no compila
-- og_installNetHooks (CFURLRequest hook) no compila
-- hookFileManager en EacHooks no hace nada
-- DebugCanvas en Core.mm no compila
+With `PRODUCTION` defined:
+- Logger silences LOG_D and LOG_I (only LOG_W and LOG_E active)
+- dumpPayload in EacHooks does not compile
+- og_installNetHooks (CFURLRequest hook) does not compile

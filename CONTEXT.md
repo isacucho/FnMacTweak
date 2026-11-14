@@ -1,83 +1,63 @@
-# FnMacUpdateFix - Contexto del proyecto
+# FnMacUpdateFix - Project context
 
-## Descripcion
+## Description
 
-Dylib inyectada via `DYLD_INSERT_LIBRARIES` en `FortniteClient-IOS-Shipping` (ARM64 Catalyst)
-que permite ejecutar Fortnite iOS en macOS. Version activa: **V23.8.0**.
+Dylib injected via `DYLD_INSERT_LIBRARIES` into `FortniteClient-IOS-Shipping` (ARM64 Catalyst)
+to run Fortnite iOS on macOS. Active version: **V23.8.1**.
 
-Target: `FortniteClient-IOS-Shipping`, ASLR slide `0x46c000`, base `0x10046c000`.
+Target: `FortniteClient-IOS-Shipping`, build 60278837 (Fortnite 43.10).
+ASLR slide `0x46c000`, base `0x10046c000`.
 
-## Arquitectura de hooks
+## Hook architecture
 
 ### KickBypass (`include/update/KickPatcher.hpp`)
-- Parchea 18 entradas del vtable en `__DATA_CONST` apuntando a `ClientWasKicked_Implementation`
-- El stub suprime reasons 1/3/5 (GenericKick / EncryptionRequired / ClientIdRestriction = ValidationFailed / EAC)
-- Solo pasa a la implementacion original los reasons 2/4 (WasBanned / CrossPlayRestriction)
-- v2.0.32: 18/18 entries patched, slide=0x46c000, orig=0x1089f8f18, stub=0x113da5720
-- **NO cubre**: client-side performance exits (LogFortPerformance triggers)
+- Patches 18 vtable entries in `__DATA_CONST` pointing to `ClientWasKicked_Implementation`
+- The stub suppresses all kick reasons and logs a timestamp to `g_last_kick_suppressed_at`
+- 43.10: 18/18 entries patched, fn_offset=0x865a2b8
+- Installed via `install_kick_bypass()` in Core.mm
 
-### NmtPatch (`include/update/NmtPatcher.hpp`)
-- Chain-patch en `__DATA_CONST` a offset `0x10c73ff10` (seg __DATA_CONST)
-- Deshabilita la comprobacion de plataforma/netmode que rechazaria el cliente macOS
-- v2.0.32: chain_patched=1, segs=1, virt_patched=0
+### NmtPatcher (`include/update/NmtPatcher.hpp`)
+- Chain-patch in `__DATA_CONST` at offset `0x10c73ff10`
+- Disables platform/netmode check that rejects the macOS client
+- 43.10: chain_patched=1, segs=1
+
+### CompatReport (`src/eos/CompatReport.cpp`)
+- Hooks the compat report vtable function via 33-instruction fingerprint scan
+- Suppresses type=10 (sideload/JIT validation) and all flag=1 failure reports
+- Replaces ValidationPatch entirely; covers the same vtable function without breaking EAC
 
 ### EosHooks (`src/eos/EosHooks.cpp`)
-- DYLD_INTERPOSE sobre simbolos C exportados de EOSSDK.framework
-- `EOS_AntiCheatClient_BeginSession`: logging de sesion EAC
-- `EOS_AntiCheatClient_GetSystemRequirementStatus`: fuerza retorno 0/0 (EOS_Success) para que macOS no sea rechazado como plataforma no soportada
-- `EOS_AntiCheatClient_PollStatus`: logging de violaciones EAC
-
-### OtaUpdater (`src/update/OtaUpdater.mm`)
-- Sesion efimera dedicada (ephemeralSessionConfiguration), NUNCA sharedSession
-- Gateado por `config().autoupdate` (default false): sin flag, no hace red
-- Solo descarga desde `github.com` / `*.githubusercontent.com` (HTTPS forzado)
-- Verifica SHA-256 de la dylib descargada antes de aplicar
-- Deja el update en `$HOME/Documents/FnMacBypass-update.dylib` para aplicar con deploy.sh
-
-### GameUpdater (`src/update/GameUpdater.mm`)
-- Sin red. Lee `CFBundleVersion` del bundle principal al arranque
-- Compara contra builds soportados: 59596594 (43.00), 60278837 (43.10)
-- Registra en log si el build activo esta soportado o es desconocido
-
-### EacHooks (`include/network/EacHooks.hpp`)
-- Logging de CLIENT HEADERs salientes (Content-Length, User-Agent, Transfer-Encoding)
-- Intercepta headers EOS SDK para diagnostico de auth
-
-### NetHook (subsistema `:main`)
-- `[NetHook] didReceiveData`: log de chunks recibidos
-- `[NetHook] didComplete`: log de HTTP status + error para toda NSURLSession
+- DYLD_INTERPOSE over exported C symbols of EOSSDK.framework
+- `EOS_GetSystemRequirementStatus`: forces return 0 (EOS_Success) so macOS is not rejected
+- 8 symbols interposed
 
 ### DeviceSpoof (`src/metadata/DeviceSpoof.mm`)
 - User-Agent: `Fortnite/43.00.0 (iPad14,3; iPhone OS 17.5; Scale/3.00)`
-- Impersonates iPad14,3 para que los endpoints iOS acepten las requests
+- Hides jailbreak paths (Cydia, MobileSubstrate, /var/jb, ...)
+- Removes DYLD_INSERT_LIBRARIES and DYLD_LIBRARY_PATH from environment
 
-### TerrainPatcher (`include/update/TerrainPatcher.hpp`)
-- Ucas terrain patch; ruido rutinario de stale ucas ignorado en analisis
+### ContentPatch (`src/update/ContentPatch.mm`)
+- Session swizzle to suppress CL (content link) errors
 
-### InputHooks
-- FPS unlock, input.ini override, native KBM support
+### CustomizationPatcher (`src/update/CustomizationPatcher.cpp`)
+- Patches NumLoadCustomizationFailed path
 
-### GameLogMirror (`src/core/GameLogMirror.cpp`)
-- Espeja `LogGameLog` al subsistema `com.alexgrdev.fnmackickfix:diag`
+### StatusCodeFix (`src/network/StatusCodeFix.mm`)
+- Patches HTTP 201 -> 200 in FBackgroundNSURLSession::GetDownloadResult
 
-## Subsistemas de log
+### OsLogInterceptor / EngineHooks
+- OsLog subsystem mirroring and engine-level hooks
 
-- `:diag` - eventos del motor UE (GameLog, Ctx/disparadores)
-- `:main` - hooks de red (NetHook, EAC-Auth, EOS)
+## Log subsystems
 
-## Endpoints criticos
+- `com.alexgrdev.fnmackickfix` (OSLog): KickBypass, CompatReport, NmtPatcher
+- `FnDiag.log` (file): all modules via DiagLog
 
-| Endpoint | Metodo | Status en v2.0.32 | Impacto |
-|---|---|---|---|
-| `account/.../linkIdentity` | GET | HTTP 429 (startup) | Rate limit; EOS session continua |
-| `cooked-content-package/link/experience_br?platform=ios&major=43` | GET | HTTP 400 | Falla de contenido BR; causa NumLoadCustomizationFailed |
-| `datarouter/.../eteventstream` | POST | HTTP 204 | OK |
-| `fn-service-habanero.../trackprogress` | GET | HTTP 200 | OK |
+## Architecture rule
 
-## Cuentas/identidades
+ZERO disk patching: the game binary on disk is never touched or modified.
+Only vtable swaps in __DATA_CONST via vm_protect(RW) on 16KB pages.
 
-- `account_id`: `163f1e4f35414184b415f93411ac93a0`
-- `device_id`: `E9B20D9D-8BB4-539F-9576-C0486180056C`
-- `deployment_id`: `62a9473a2dca46b29ccf17577fcf42d7`
-- EOS SDK: v1.19.4300.0-59053925@Fortnite
-- Fortnite version: 43.00.0 / CL-59596594
+AMFI constraint: vm_protect(VM_PROT_COPY) on __TEXT of the main executable is blocked
+by AMFI (EXC_BAD_ACCESS SIGKILL, Namespace CODESIGNING Code 2). Only __DATA_CONST writes
+are safe. Dylib __TEXT pages are not subject to this restriction.
