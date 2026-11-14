@@ -46,7 +46,6 @@ CPP_SRC := \
     src/update/TerrainPatcher.cpp \
     src/update/KickPatcher.cpp \
     src/update/NmtPatcher.cpp \
-    src/update/NetFailurePatcher.cpp \
     src/update/CustomizationPatcher.cpp \
     src/input/FpsUnlock.cpp \
     src/input/InputIni.cpp \
@@ -60,10 +59,7 @@ MM_SRC := \
     src/core/OsLogInterceptor.mm \
     src/core/LogSpoofer.mm \
     src/metadata/DeviceSpoof.mm \
-    src/network/EacHooks.mm \
     src/update/EngineHooks.mm \
-    src/update/NetworkHooks.mm \
-    src/update/ContentPatch.mm \
     src/update/Updater.mm \
     src/input/InputProbe.mm
 

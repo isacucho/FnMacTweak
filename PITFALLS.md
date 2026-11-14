@@ -45,11 +45,12 @@ Esto aplica SOLO al ejecutable principal; dylibs externos (EOSSDK, etc.) se pued
 vm_protect en __DATA_CONST funciona sin restriccion AMFI (usado por KickBypass, ValidationPatch y BNF).
 Llamar a __TEXT via function pointer (execute/read) es siempre seguro; solo la ESCRITURA esta bloqueada.
 
-**BYPASS activo (VTable swap en __DATA_CONST, V23.7.8):**
-- Scan de __DATA_CONST para todos los slots apuntando a `base + 0x56c999c`
-- vm_protect(RW) en pagina 16KB (Apple Silicon) -> escritura -> vm_protect(R) + dmb ish
-- g_orig_bnf = puntero directo a bnf_va en __TEXT (llamarlo desde stub es AMFI-safe: execute, no write)
-- bnf_bypass_stub: suprime ConnectionLost dentro de ventana kick; synthetic CT a t+25s via dispatch_after
+**BNF ELIMINADO (V23.7.9):**
+NetFailurePatcher.cpp, NetworkHooks.mm, ContentPatch.mm y EacHooks.mm quitados del build.
+Motivo: hookear NSURLSession (hook_session_factory inyectaba FnContentLinkProtocol en TODAS las
+sesiones, installNetHooks hookea delegates + NSMutableURLRequest) interfiere con la conexion
+del juego y causa "Network Connection Lost" / errors.com.epicgames.common.processing.
+No tocar nada de red. Solo hooks del subsistema (vtable swaps en __DATA_CONST).
 
 ### ClientWasKicked (kick RPC)
 
@@ -61,7 +62,7 @@ Confirmado en binario:
 **BYPASS activo (KickBypass):**
 - 18 entries parcheadas: vtable[0] @ 0xce7d390, ... (ver KickPatcher.cpp kKickedEntries_4310)
 - Verificado en runtime PID 78872: `[KickBypass] 43.10: patched 18/18`
-- kicked_bypass_stub registra timestamp en g_last_kick_suppressed_at para coordinacion BNF
+- kicked_bypass_stub registra timestamp en g_last_kick_suppressed_at (coordinacion BNF eliminada en V23.7.9)
 
 ### EAC AntiCheatClient (EOS SDK)
 
