@@ -37,11 +37,19 @@ Cadena confirmada en binario:
 - `UEngine::BroadcastNetworkFailure: FailureType = %ls, ErrorString = %ls` -> log UE5 del path de fallo
 - Funcion BNF en file offset 0x56c999c, prologue: `ff 03 02 d1` = `SUB SP, SP, #0x80` (ARM64 ✓)
 
-**BYPASS activo (MSHookFunction + NetFailurePatcher, refactor 2026-11-14):**
-- `MSHookFunction(base + 0x56c999c, bnf_bypass_stub, &g_orig_bnf)` - Substrate parchea prologo en __TEXT
+**REGLA ARQUITECTURA INNEGOCIABLE: ZERO disk patching. El binario en disco no se toca jamas.**
+
+**AMFI CONSTRAINT (critico):** MSHookFunction/vm_protect(VM_PROT_COPY) en __TEXT del ejecutable principal
+es bloqueado por AMFI -> EXC_BAD_ACCESS SIGKILL, Namespace CODESIGNING Code 2.
+Esto aplica SOLO al ejecutable principal; dylibs externos (EOSSDK, etc.) se pueden hookear con MSHookFunction.
+vm_protect en __DATA_CONST funciona sin restriccion AMFI (usado por KickBypass, ValidationPatch y BNF).
+Llamar a __TEXT via function pointer (execute/read) es siempre seguro; solo la ESCRITURA esta bloqueada.
+
+**BYPASS activo (VTable swap en __DATA_CONST, V23.7.8):**
+- Scan de __DATA_CONST para todos los slots apuntando a `base + 0x56c999c`
+- vm_protect(RW) en pagina 16KB (Apple Silicon) -> escritura -> vm_protect(R) + dmb ish
+- g_orig_bnf = puntero directo a bnf_va en __TEXT (llamarlo desde stub es AMFI-safe: execute, no write)
 - bnf_bypass_stub: suprime ConnectionLost dentro de ventana kick; synthetic CT a t+25s via dispatch_after
-- RIESGO AMFI: si Substrate usa vm_protect(COPY) en __TEXT -> mismo kill que nuestro codigo directo (ver PITFALLS v2.1.11)
-- Si crash con EXC_BAD_ACCESS Namespace CODESIGNING Code 2: volver a disk island (patch_binary.py archivado en git)
 
 ### ClientWasKicked (kick RPC)
 

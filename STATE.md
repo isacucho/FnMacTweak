@@ -1,24 +1,32 @@
 # Estado de la investigacion
 
-## Estado actual (2026-11-14, refactor in-memory + auditoria)
+## Estado actual (2026-11-14, V23.7.8)
 
-### Refactor arquitectura in-memory (2026-11-14, V23.7.7)
+### V23.7.8: BNF + CustomPatch via vtable swap en __DATA_CONST (2026-11-14)
 
-Eliminado disk patching por completo. Nueva arquitectura pura en memoria:
+AMFI bloquea MSHookFunction/vm_protect(COPY) en __TEXT del ejecutable principal.
+Reemplazados ambos hooks por scan de __DATA_CONST + vm_protect(RW) en paginas 16KB.
+Mismo mecanismo que KickBypass (18 entradas) y ValidationPatch.
 
-6. **BNF via MSHookFunction** (NetFailurePatcher.cpp).
-   Reemplazada la disk-island scan + slot write por `MSHookFunction(base + 0x56c999c, bnf_bypass_stub, &g_orig_bnf)`.
-   Substrate parchea el prologo de BNF en __TEXT en runtime.
-   RIESGO: si AMFI mata el proceso (EXC_BAD_ACCESS, Namespace CODESIGNING Code 2) -> Substrate tiene la misma
-   restriccion que nuestro codigo directo con vm_protect(COPY). En ese caso restaurar disk island desde git.
+6. **BNF via __DATA_CONST vtable swap** (NetFailurePatcher.cpp).
+   Scan de __DATA_CONST para todos los slots apuntando a `base + kBnfOffset`.
+   g_orig_bnf = puntero directo a bnf_va (execute, no write -> AMFI-safe).
+   Si BNF no aparece en vtables (devirtualizado): synthetic CT a t+25s sigue activo.
 
-7. **CustomizationFailed via MSHookFunction** (CustomizationPatcher.cpp).
-   Reemplazada la island verification + slot write por `MSHookFunction(base + 0xa30b698, customization_failed_stub, nullptr)`.
-   Prologue verificado (0xA9F66FFC = STP X28,X27,[SP,#-0x50]!) antes de hookear.
+7. **CustomizationFailed via __DATA_CONST vtable swap** (CustomizationPatcher.cpp).
+   Intento 1: fixed offset `kCustomFnOff = 0xa30b698` con prologue check.
+   Intento 2: string scan "execHandleCustomizationFailed" en __cstring + ADRP+ADD walkback.
+   Si se encuentra fn_va: scan __DATA_CONST y patch slots.
+   kCustomFnOff tiene prologue incorrecto en 43.10 -> string scan es el path principal.
 
-8. **tools/patch_binary.py eliminado**.
-   El script de disk patching ha sido borrado. El historial git conserva la version anterior.
-   deploy.sh ya no llama patch_binary.py.
+8. **tools/patch_binary.py eliminado** (desde V23.7.6).
+   Sin disk patching. deploy.sh no lo llama.
+
+### Sin verificar (V23.7.8)
+- Partida BR completa con BNF vtable swap activo
+- Verificar en log: "[NetFailurePatch] BNF vtable swap: N slot(s)" con N > 0
+- Verificar en log: "[CustomPatch] vtable swap: N slot(s)" o string scan path
+- Verificar: ConnectionLost suprimido, synthetic CT a t+25s, lobby return limpio sin NCL
 
 ### Correcciones aplicadas (2026-11-14, auditoria bugs)
 

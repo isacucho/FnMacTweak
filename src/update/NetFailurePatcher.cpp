@@ -3,6 +3,7 @@
 #include "core/DiagLog.hpp"
 
 #include <mach/mach.h>
+#include <mach/vm_map.h>
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -10,8 +11,6 @@
 #include <cstdint>
 #include <cstring>
 #include <atomic>
-
-extern "C" void MSHookFunction(void* symbol, void* replace, void** result);
 
 namespace fndiag {
 
@@ -263,23 +262,58 @@ void install_net_failure_patch() {
         return;
     }
 
-    // --- 3. Hook BNF via MSHookFunction ---
-    // Substrate patches the function prologue in __TEXT at runtime.
-    // g_orig_bnf receives the trampoline pointer for calling the original.
-    // NOTE: if AMFI kills the process on first execute of the patched page
-    // (EXC_BAD_ACCESS SIGKILL, Namespace CODESIGNING Code 2), Substrate's
-    // __TEXT write is AMFI-fatal on this build — same restriction as direct
-    // vm_protect(VM_PROT_COPY). In that case, the disk-island approach
-    // (patch_binary.py + deploy.sh) is the only viable path.
-    MSHookFunction(reinterpret_cast<void*>(bnf_va),
-                   reinterpret_cast<void*>(bnf_bypass_stub),
-                   reinterpret_cast<void**>(&g_orig_bnf));
+    // --- 3. VTable swap in __DATA_CONST (AMFI-safe, no __TEXT write) ---
+    // MSHookFunction/vm_protect(COPY) on main executable __TEXT is blocked by AMFI
+    // (EXC_BAD_ACCESS SIGKILL, Namespace CODESIGNING Code 2). Instead, scan
+    // __DATA_CONST for all vtable slots pointing to bnf_va and redirect them to our
+    // stub. vm_protect on __DATA_CONST works without AMFI restriction (same as
+    // KickBypass's 18-entry patch). Calling __TEXT via function pointer is an execute
+    // (read) operation - AMFI-safe.
+    g_orig_bnf = reinterpret_cast<BnfFn>(bnf_va);
 
-    if (g_orig_bnf) {
-        log_line("[NetFailurePatch] BNF hooked at 0x%lx via MSHookFunction (orig trampoline=0x%lx)",
-                 (long)bnf_va, (long)(uintptr_t)g_orig_bnf);
+    uintptr_t stub_va = reinterpret_cast<uintptr_t>(bnf_bypass_stub);
+    int patched = 0;
+
+    const uint8_t* cmd_ptr = reinterpret_cast<const uint8_t*>(mh) + sizeof(mach_header_64);
+    for (uint32_t i = 0; i < mh->ncmds; ++i) {
+        const load_command* lc = reinterpret_cast<const load_command*>(cmd_ptr);
+        if (lc->cmd == LC_SEGMENT_64) {
+            const segment_command_64* seg = reinterpret_cast<const segment_command_64*>(lc);
+            if (strncmp(seg->segname, "__DATA_CONST", 16) == 0) {
+                uintptr_t seg_start = seg->vmaddr + slide;
+                uintptr_t seg_end   = seg_start + seg->vmsize;
+                for (uintptr_t addr = seg_start;
+                     addr + sizeof(uintptr_t) <= seg_end;
+                     addr += sizeof(uintptr_t)) {
+                    if (*reinterpret_cast<const volatile uintptr_t*>(addr) != bnf_va) continue;
+                    // 16KB page (Apple Silicon)
+                    mach_vm_address_t page = addr & ~((mach_vm_address_t)0x3FFF);
+                    kern_return_t kr = vm_protect(mach_task_self(),
+                                                  static_cast<vm_address_t>(page), 0x4000, false,
+                                                  VM_PROT_READ | VM_PROT_WRITE);
+                    if (kr != KERN_SUCCESS) {
+                        log_line("[NetFailurePatch] vm_protect(rw) FAIL kr=%d slot=0x%lx",
+                                 kr, (long)addr);
+                        continue;
+                    }
+                    *reinterpret_cast<volatile uintptr_t*>(addr) = stub_va;
+                    __asm__ volatile("dmb ish" ::: "memory");
+                    vm_protect(mach_task_self(),
+                               static_cast<vm_address_t>(page), 0x4000, false, VM_PROT_READ);
+                    ++patched;
+                    log_line("[NetFailurePatch] vtable slot patched 0x%lx -> stub", (long)addr);
+                }
+            }
+        }
+        cmd_ptr += lc->cmdsize;
+    }
+
+    if (patched > 0) {
+        log_line("[NetFailurePatch] BNF vtable swap: %d slot(s) bnf=0x%lx stub=0x%lx",
+                 patched, (long)bnf_va, (long)stub_va);
     } else {
-        log_line("[NetFailurePatch] WARNING: MSHookFunction returned null orig for BNF 0x%lx",
+        log_line("[NetFailurePatch] WARNING: BNF (0x%lx) not in __DATA_CONST vtable -- "
+                 "devirtualized callers won't be intercepted; synthetic CT still active",
                  (long)bnf_va);
     }
 }
