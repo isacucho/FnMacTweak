@@ -45,8 +45,25 @@ Auditoria exhaustiva del codigo fuente. Bugs encontrados y corregidos:
 Referencia: rt-someone/FnMacTweak es un tweak QoL/input (120FPS, mouse), sin solapamiento
 con este repo. No tiene kick bypass, BNF patching ni EOS hooks.
 
+### V23.7.7: fix compatibilidad JadedFix (2026-11-14)
+
+Conflicto confirmado: `kVersionTable` para 43.00 tiene fn1_off=0x74c1334 / vtable1_off=0xcd32e18,
+exactamente los offsets hardcodeados en JadedFix/kick_fix.c. Para 43.10, JadedFix usa fnResolve
+que escanea __DATA_CONST buscando un puntero al fn1 original. Nuestro patch_vtable_entry
+reemplazaba ese puntero por validation_pass_stub ANTES de que JadedFix inicializara, asi
+fnResolve encontraba 0 slots y JadedFix no instalaba.
+
+Fix: install_validation_patch() diferida a dispatch_async(main_queue). Los constructores de
+dylib (JadedFix incluido) completan antes de que el main queue drene. Cuando nuestro bloque
+corre: si JadedFix ya patcho slot1, patch_vtable_entry detecta current!=expected y lo salta.
+Si JadedFix no esta presente, slot1 sigue con fn1_va y lo parcheamos nosotros.
+
+Error observado (errors.com.epicgames.common.processing): consecuencia de JadedFix no instalado,
+el backend rechaza la sesion por los tipos {5,19,23,49} sin bypass.
+
 ### Sin verificar en esta sesion
-- Partida completa con install_customization_patch() activo (slot ahora armado)
+- Partida completa con fix JadedFix activo (V23.7.7)
+- Verificar en log: "[ValidationPatch] skip vtable" para slot1 cuando JadedFix activo
 - EAC interceptor tipo 0x01 en log real post-fix
 
 ---

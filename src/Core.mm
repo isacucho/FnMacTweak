@@ -35,12 +35,17 @@ __attribute__((constructor)) static void fncompat_init() {
         fndiag::write_log_key_file(container);
         BOOT_PROBE("4_logkey_done");
 
-        // ValidationPatch: suprime la deteccion sideload/JIT en vtable 0xcd32e18 y
-        // 0xcd32df8. El stub devuelve 0 antes de que se active el dispatch de kick.
         installSpoofHooks();
         BOOT_PROBE("5_spoof_done");
-        fndiag::install_validation_patch();
-        BOOT_PROBE("6_validation_done");
+        // ValidationPatch: diferido al main queue para que el constructor de JadedFix
+        // (tambien dylib, carga antes de que el main queue drene) patche slot1 primero.
+        // Si JadedFix no esta presente, slot1 sigue con fn1_va original y lo parcheamos
+        // nosotros. patch_vtable_entry detecta current!=expected y salta si ya fue
+        // parchado por JadedFix.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            fndiag::install_validation_patch();
+            BOOT_PROBE("6_validation_done_async");
+        });
         install_eos_hooks();
         BOOT_PROBE("7_eos_hooks_done");
         installNetHooks();
