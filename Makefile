@@ -1,7 +1,7 @@
 FW_DIR := /Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app/Frameworks
 INSTALLED_NAME := FnMacBypass.dylib
 
-.PHONY: all dev beta public package clean install
+.PHONY: all dev beta rc public package clean install
 
 include common.mk
 
@@ -9,6 +9,11 @@ SDK     := $(shell xcrun --sdk iphoneos --show-sdk-path)
 CXX     := xcrun --sdk iphoneos clang++
 TARGET  := arm64-apple-ios17.0
 
+# --- Flags por canal -------------------------------------------------
+# dev    : sin optimización, símbolos completos, logs extendidos
+# beta   : optimización media, símbolos (gdb/lldb útil para testers)
+# rc     : release candidate — ofuscación máxima, sin DWARF, sin símbolos locales
+# public : igual que rc (release final, CH_TAG vacío en el artefacto)
 OPT        := -O2
 DEBUG_FLAGS :=
 STRIP_FLAGS :=
@@ -18,13 +23,12 @@ ifeq ($(CHANNEL),dev)
   DEBUG_FLAGS := -g
 else ifeq ($(CHANNEL),beta)
   DEBUG_FLAGS := -g
+else ifeq ($(CHANNEL),rc)
+  DEFINES     += -DPRODUCTION
+  # -Wl,-x : elimina símbolos locales; -Wl,-S : elimina secciones __DWARF
+  STRIP_FLAGS := -Wl,-x -Wl,-S
 else ifeq ($(CHANNEL),public)
   DEFINES     += -DPRODUCTION
-  # Strip all local symbols and debug sections from the output dylib.
-  # -Wl,-x : remove local (non-exported) symbols
-  # -Wl,-S : strip debug info (__DWARF sections)
-  # Together these eliminate function names, source paths and line numbers
-  # from the distributed binary, complementing -fvisibility=hidden.
   STRIP_FLAGS := -Wl,-x -Wl,-S
 endif
 
@@ -92,11 +96,35 @@ dev:
 beta:
 	$(MAKE) CHANNEL=beta _build
 
+rc:
+	$(MAKE) CHANNEL=rc _build
+
 public:
 	$(MAKE) CHANNEL=public _build
 
-package: public
-	$(MAKE) -C builds package CHANNEL=public
+# DEV=1 / BETA=1 / RC=1 / PRODUCTION=1 como atajos
+DEV=
+BETA=
+RC=
+PRODUCTION=
+ifneq ($(DEV),)
+  override CHANNEL := dev
+endif
+ifneq ($(BETA),)
+  override CHANNEL := beta
+endif
+ifneq ($(RC),)
+  override CHANNEL := rc
+endif
+ifneq ($(PRODUCTION),)
+  override CHANNEL := rc
+endif
+
+# package: empaqueta el canal indicado (por defecto rc) en builds/release/
+# Genera: <ARTIFACT>.dylib + manifest.json
+package:
+	$(MAKE) CHANNEL=$(or $(CHANNEL),rc) _build
+	$(MAKE) -C builds package CHANNEL=$(or $(CHANNEL),rc)
 
 install: dev
 	cp builds/dev/$(NAME) $(FW_DIR)/$(INSTALLED_NAME)
@@ -104,7 +132,7 @@ install: dev
 	@md5 builds/dev/$(NAME) $(FW_DIR)/$(INSTALLED_NAME)
 
 clean:
-	rm -rf builds/dev builds/beta builds/public builds/release
+	rm -rf builds/dev builds/beta builds/rc builds/public builds/release
 
 _build: $(OUT)
 
