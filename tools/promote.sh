@@ -40,7 +40,15 @@ is_valid "$SRC_CH" || { echo "Canal origen inválido: $SRC_CH"; usage; }
 is_valid "$DST_CH" || { echo "Canal destino inválido: $DST_CH"; usage; }
 
 VERSION="$(cat "$ROOT/VERSION" | tr -d '[:space:]')"
-SRC_DYLIB="$ROOT/builds/$SRC_CH/FnMacBypass.dylib"
+
+# Mapear canal a etiqueta (igual que common.mk CH_TAG)
+case "$SRC_CH" in
+  dev)    CH_TAG="-dev" ;;
+  beta)   CH_TAG="-beta" ;;
+  rc)     CH_TAG="-rc" ;;
+  public) CH_TAG="" ;;
+esac
+SRC_DYLIB="$ROOT/builds/$SRC_CH/FnMacBypass-V${VERSION}${CH_TAG}.dylib"
 
 echo "=== FnMac Promote V${VERSION}: ${SRC_CH} → ${DST_CH} ==="
 
@@ -102,11 +110,17 @@ if [[ "$DST_CH" == "public" ]]; then
     echo "=== Listo. Artefacto final en builds/release/ ==="
     echo "    Siguiente paso: gh release create v${VERSION} builds/release/*.dylib builds/release/manifest.json"
 else
-    # Copiar dylib al canal destino para que make <destino> la detecte
+    # Copiar dylib al canal destino como referencia (make <destino> recompila desde fuente)
+    case "$DST_CH" in
+      dev)    DST_TAG="-dev" ;;
+      beta)   DST_TAG="-beta" ;;
+      rc)     DST_TAG="-rc" ;;
+      public) DST_TAG="" ;;
+    esac
     DST_DIR="$ROOT/builds/$DST_CH"
     mkdir -p "$DST_DIR"
-    cp "$SRC_DYLIB" "$DST_DIR/FnMacBypass.dylib"
-    echo "[5/5] Copiado a $DST_DIR/"
+    cp "$SRC_DYLIB" "$DST_DIR/FnMacBypass-V${VERSION}${DST_TAG}.dylib"
+    echo "[5/5] Copiado a $DST_DIR/FnMacBypass-V${VERSION}${DST_TAG}.dylib"
     echo ""
     echo "=== Listo. Ahora compila el canal destino con sus propias flags: ==="
     echo "    make $DST_CH"

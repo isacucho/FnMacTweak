@@ -10,7 +10,7 @@ CHANNEL ?= rc
 include ../common.mk
 
 REPO    ?= AlexGRDev/FnMacUpdateFix
-SRC     := $(CHANNEL)/$(NAME)
+SRC     := $(CHANNEL)/$(ARTIFACT).dylib
 REL     := release
 # Artefacto con nombre de canal: FnMacBypass-V23.7.8-rc.dylib etc.
 OUT_DYLIB := $(REL)/$(ARTIFACT).dylib

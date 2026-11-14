@@ -33,7 +33,7 @@ else ifeq ($(CHANNEL),public)
 endif
 
 OUTDIR  := builds/$(CHANNEL)
-OUT     := $(OUTDIR)/$(NAME)
+OUT     := $(OUTDIR)/$(ARTIFACT).dylib
 
 # Fuentes C++ puro (sin ObjC)
 CPP_SRC := \
@@ -129,7 +129,7 @@ package:
 	$(MAKE) -C builds package CHANNEL=$(or $(CHANNEL),rc)
 
 install: dev
-	cp builds/dev/$(NAME) $(FW_DIR)/$(INSTALLED_NAME)
+	cp builds/dev/FnMacBypass-V$(VERSION)-dev.dylib $(FW_DIR)/$(INSTALLED_NAME)
 	@echo "installed $(NAME) as $(INSTALLED_NAME)"
 	@md5 builds/dev/$(NAME) $(FW_DIR)/$(INSTALLED_NAME)
 
