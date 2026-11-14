@@ -312,8 +312,14 @@ void install_net_failure_patch() {
         log_line("[NetFailurePatch] BNF vtable swap: %d slot(s) bnf=0x%lx stub=0x%lx",
                  patched, (long)bnf_va, (long)stub_va);
     } else {
-        log_line("[NetFailurePatch] WARNING: BNF (0x%lx) not in __DATA_CONST vtable -- "
-                 "devirtualized callers won't be intercepted; synthetic CT still active",
+        // BNF is fully devirtualized in this build: all callers use direct BL.
+        // Vtable swap cannot intercept them. bnf_bypass_stub never fires, so the
+        // synthetic CT at t+25s is also inactive. ConnectionLost floods will reach
+        // the game -> NCL screen. Next step: GEngine instance vtable swap or
+        // schedule synthetic CT directly from kicked_bypass_stub.
+        g_orig_bnf = nullptr;
+        log_line("[NetFailurePatch] WARNING: BNF (0x%lx) not in __DATA_CONST vtable "
+                 "(devirtualized build) -- CL suppression and synthetic CT INACTIVE",
                  (long)bnf_va);
     }
 }

@@ -24,9 +24,11 @@ Mismo mecanismo que KickBypass (18 entradas) y ValidationPatch.
 
 ### Sin verificar (V23.7.8)
 - Partida BR completa con BNF vtable swap activo
-- Verificar en log: "[NetFailurePatch] BNF vtable swap: N slot(s)" con N > 0
-- Verificar en log: "[CustomPatch] vtable swap: N slot(s)" o string scan path
-- Verificar: ConnectionLost suprimido, synthetic CT a t+25s, lobby return limpio sin NCL
+- **CRITICO**: verificar en log: "[NetFailurePatch] BNF vtable swap: N slot(s)" con N > 0
+  Si N = 0: BNF esta devirtualizado en este build -> CL suppression y synthetic CT inactivos
+  -> NCL screen persiste. Siguiente paso: GEngine instance vtable swap en heap.
+- Verificar en log: "[CustomPatch] vtable swap: N slot(s)" o "fn via string scan"
+- Verificar: ConnectionLost suprimido, lobby return limpio sin NCL a t+25s
 
 ### Correcciones aplicadas (2026-11-14, auditoria bugs)
 
