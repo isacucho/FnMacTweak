@@ -7,6 +7,7 @@
 #include "core/SimulatorContext.hpp"
 #include "update/KickPatcher.hpp"
 #include "update/CustomizationPatcher.hpp"
+#include "update/Updater.hpp"
 #include "metadata/DeviceSpoof.hpp"
 #include "eos/EosHooks.hpp"
 #include "eos/MkwBypass.hpp"
@@ -52,5 +53,12 @@ __attribute__((constructor)) static void fncompat_init() {
         BOOT_PROBE("9_kickbypass_done");
         fndiag::install_customization_patch();
         BOOT_PROBE("10_custompatch_done");
+
+        // Updater: diferido 30s en background para no interferir con la conexion a Epic.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC),
+                       dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
+            Updater::getInstance().setUpdateConfig(UPDATE_MANIFEST_URL, MODULE_VERSION);
+            Updater::getInstance().checkForUpdates();
+        });
     }
 }

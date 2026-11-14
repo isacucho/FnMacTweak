@@ -1,7 +1,7 @@
 ROOT     := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 VERSION  := $(shell cat $(ROOT)/VERSION)
 CHANNEL  ?= dev
-PRODUCT  ?= FnMacBypass
+PRODUCT  ?= FnMacUpdateFix
 GH_USER  ?= AlexGRDev
 
 # Pipeline de publicación: dev → beta → rc → public
