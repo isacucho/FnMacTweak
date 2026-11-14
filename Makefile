@@ -80,6 +80,8 @@ FLAGS := \
 LDFLAGS := \
     -dynamiclib \
     -install_name @rpath/$(NAME) \
+    -Wl,-current_version,$(VERSION) \
+    -Wl,-compatibility_version,1.0.0 \
     -Wl,-undefined,dynamic_lookup \
     -Wl,-w \
     $(STRIP_FLAGS) \
