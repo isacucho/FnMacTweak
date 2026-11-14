@@ -3,9 +3,9 @@
 ## Descripcion
 
 Dylib inyectada via `DYLD_INSERT_LIBRARIES` en `FortniteClient-IOS-Shipping` (ARM64 Catalyst)
-que permite ejecutar Fortnite iOS en macOS. Version activa: **v2.0.32**.
+que permite ejecutar Fortnite iOS en macOS. Version activa: **V23.8.0**.
 
-Target: `FortniteClient-IOS-Shipping` PID 61029, ASLR slide `0x46c000`, base `0x10046c000`.
+Target: `FortniteClient-IOS-Shipping`, ASLR slide `0x46c000`, base `0x10046c000`.
 
 ## Arquitectura de hooks
 
@@ -27,10 +27,17 @@ Target: `FortniteClient-IOS-Shipping` PID 61029, ASLR slide `0x46c000`, base `0x
 - `EOS_AntiCheatClient_GetSystemRequirementStatus`: fuerza retorno 0/0 (EOS_Success) para que macOS no sea rechazado como plataforma no soportada
 - `EOS_AntiCheatClient_PollStatus`: logging de violaciones EAC
 
-### NetworkHooks (`src/update/NetworkHooks.mm`)
-- Hook `+[NSURLSession sessionWithConfiguration:delegate:delegateQueue:]`: instrumenta delegate
-- Hook `-[NSURLSession dataTaskWithRequest:]` y `dataTaskWithRequest:completionHandler:`: inyecta account_id en requests a `/api/verify/event`
-- `patch_request_if_needed()`: cuando URL contiene `/api/verify/event`, inyecta `X-Epic-AccountId` y `AccountID` en headers, y `accountId` en JSON body
+### OtaUpdater (`src/update/OtaUpdater.mm`)
+- Sesion efimera dedicada (ephemeralSessionConfiguration), NUNCA sharedSession
+- Gateado por `config().autoupdate` (default false): sin flag, no hace red
+- Solo descarga desde `github.com` / `*.githubusercontent.com` (HTTPS forzado)
+- Verifica SHA-256 de la dylib descargada antes de aplicar
+- Deja el update en `$HOME/Documents/FnMacBypass-update.dylib` para aplicar con deploy.sh
+
+### GameUpdater (`src/update/GameUpdater.mm`)
+- Sin red. Lee `CFBundleVersion` del bundle principal al arranque
+- Compara contra builds soportados: 59596594 (43.00), 60278837 (43.10)
+- Registra en log si el build activo esta soportado o es desconocido
 
 ### EacHooks (`include/network/EacHooks.hpp`)
 - Logging de CLIENT HEADERs salientes (Content-Length, User-Agent, Transfer-Encoding)
