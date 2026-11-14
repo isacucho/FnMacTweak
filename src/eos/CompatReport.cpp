@@ -20,7 +20,6 @@
 #include <mach-o/loader.h>
 #include <mach/mach.h>
 #include <mach/vm_map.h>
-#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -132,7 +131,7 @@ static bool do_resolve(Span code, Span constants, uintptr_t* target, uintptr_t* 
             if (++bodies > 1) return false;
         }
     }
-    if (bodies != 1) return false;
+    if (bodies != 1 || code.address > UINTPTR_MAX - foundOff) return false;
 
     uintptr_t candidate = code.address + foundOff;
     unsigned slots = 0;
@@ -140,7 +139,7 @@ static bool do_resolve(Span code, Span constants, uintptr_t* target, uintptr_t* 
         uintptr_t val;
         memcpy(&val, constants.bytes + off, sizeof(val));
         if (val == candidate) {
-            if (++slots > 1) return false;
+            if (++slots > 1 || constants.address > UINTPTR_MAX - off) return false;
             *slot = constants.address + off;
         }
     }
@@ -150,9 +149,8 @@ static bool do_resolve(Span code, Span constants, uintptr_t* target, uintptr_t* 
 }
 
 typedef int (*ReportFn)(void*, uint32_t, const void*, uint32_t);
-static ReportFn           g_orig{nullptr};
-static uintptr_t*         g_slot{nullptr};
-static std::atomic<bool>  g_installed{false};
+static ReportFn   g_orig{nullptr};
+static uintptr_t* g_slot{nullptr};
 
 static int compat_hook(void* self, uint32_t type, const void* data, uint32_t flag) {
     if (flag == 1 && (type == 5 || type == 19 || type == 23 || type == 49))
@@ -182,6 +180,12 @@ static bool swap_slot(uintptr_t expected, uintptr_t replacement) {
                                           __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     vm_protect(mach_task_self(), page, vm_page_size, FALSE, info.protection);
     return ok;
+}
+
+__attribute__((destructor)) static void uninstall_compat_report() {
+    if (g_slot && g_orig)
+        swap_slot(reinterpret_cast<uintptr_t>(compat_hook),
+                  reinterpret_cast<uintptr_t>(g_orig));
 }
 
 } // namespace
@@ -268,7 +272,6 @@ void install_compat_report() {
     g_orig = reinterpret_cast<ReportFn>(target);
 
     if (swap_slot(target, reinterpret_cast<uintptr_t>(compat_hook))) {
-        g_installed.store(true, std::memory_order_release);
         log_line("[CompatReport] instalado (tipos 5/19/23/49 flag=1 suprimidos)");
     } else {
         log_line("[CompatReport] vm_protect/CAS fallido");
