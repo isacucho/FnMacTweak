@@ -59,7 +59,8 @@ MM_SRC := \
     src/core/LogSpoofer.mm \
     src/metadata/DeviceSpoof.mm \
     src/update/EngineHooks.mm \
-    src/update/Updater.mm \
+    src/update/OtaUpdater.mm \
+    src/update/GameUpdater.mm \
     src/input/InputProbe.mm \
     src/network/StatusCodeFix.mm
 

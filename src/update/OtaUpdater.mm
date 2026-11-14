@@ -1,5 +1,6 @@
-#import "update/Updater.hpp"
+#import "update/OtaUpdater.hpp"
 #import "core/Logger.hpp"
+#import "core/Config.hpp"
 #import <Foundation/Foundation.h>
 #import <CommonCrypto/CommonDigest.h>
 #include <sys/stat.h>
@@ -8,12 +9,13 @@
 #include <cstdlib>
 #include <vector>
 
-#define TAG "Updater"
+#define TAG "OtaUpdater"
 
 namespace {
 
 NSError* makeError(NSString* msg) {
-    return [NSError errorWithDomain:@"FnMacKickFix" code:1 userInfo:@{NSLocalizedDescriptionKey: msg}];
+    return [NSError errorWithDomain:@"FnMacOtaUpdater" code:1
+                          userInfo:@{NSLocalizedDescriptionKey: msg}];
 }
 
 std::vector<long> parseVersion(const std::string& v) {
@@ -30,52 +32,73 @@ std::vector<long> parseVersion(const std::string& v) {
 
 } // namespace
 
-void Updater::setUpdateConfig(const std::string& manifestUrl, const std::string& currentVersion) {
+void OtaUpdater::setConfig(const std::string& manifestUrl,
+                            const std::string& currentVersion) {
     m_manifestUrl    = manifestUrl;
     m_currentVersion = currentVersion;
 }
 
-void Updater::checkForUpdates() {
-    if (m_manifestUrl.empty()) { LOG_E(TAG, "URL del manifiesto no configurada."); return; }
+void OtaUpdater::checkForUpdates() {
+    if (!fndiag::config().autoupdate) {
+        LOG_I(TAG, "autoupdate desactivado, omitiendo comprobacion");
+        return;
+    }
+    if (m_manifestUrl.empty()) { LOG_E(TAG, "URL del manifiesto no configurada"); return; }
     LOG_I(TAG, "Comprobando actualizaciones desde: %s (version actual: %s)",
           m_manifestUrl.c_str(), m_currentVersion.c_str());
 
+    NSURLSession* session = makeSession();
     NSURL* url = [NSURL URLWithString:[NSString stringWithUTF8String:m_manifestUrl.c_str()]];
-    downloadFile(url, ^(NSString* downloadedPath, NSError* error) {
+    downloadFile(session, url, ^(NSString* downloadedPath, NSError* error) {
         if (error || !downloadedPath) {
             LOG_E(TAG, "Error descargando manifiesto: %s",
                   [(error ? [error localizedDescription] : @"ruta invalida") UTF8String]);
+            [session finishTasksAndInvalidate];
             return;
         }
         NSData* data = [NSData dataWithContentsOfFile:downloadedPath];
-        if (!data) { LOG_E(TAG, "No se pudo leer el manifiesto."); return; }
-
+        if (!data) {
+            LOG_E(TAG, "No se pudo leer el manifiesto");
+            [session finishTasksAndInvalidate];
+            return;
+        }
         NSError* jsonError = nil;
-        NSDictionary* manifest = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+        NSDictionary* manifest = [NSJSONSerialization JSONObjectWithData:data
+                                                                 options:0
+                                                                   error:&jsonError];
         if (jsonError || ![manifest isKindOfClass:[NSDictionary class]]) {
-            LOG_E(TAG, "Error al parsear JSON de actualizacion."); return;
+            LOG_E(TAG, "Error al parsear JSON de actualizacion");
+            [session finishTasksAndInvalidate];
+            return;
         }
 
         NSString* latestVersion  = manifest[@"version"];
         NSString* downloadUrlStr = manifest[@"download_url"];
         NSString* expectedSha    = manifest[@"sha256"];
 
-        if (![latestVersion isKindOfClass:[NSString class]] || ![downloadUrlStr isKindOfClass:[NSString class]] ||
-            ![expectedSha isKindOfClass:[NSString class]] || [expectedSha length] != 64) {
-            LOG_E(TAG, "Manifiesto invalido (faltan version, download_url o sha256)."); return;
+        if (![latestVersion isKindOfClass:[NSString class]] ||
+            ![downloadUrlStr isKindOfClass:[NSString class]] ||
+            ![expectedSha isKindOfClass:[NSString class]] ||
+            [expectedSha length] != 64) {
+            LOG_E(TAG, "Manifiesto invalido (faltan version, download_url o sha256)");
+            [session finishTasksAndInvalidate];
+            return;
         }
 
         std::string remoteVer = [latestVersion UTF8String];
         if (!isVersionNewer(remoteVer, m_currentVersion)) {
-            LOG_I(TAG, "Ya en la ultima version (%s).", m_currentVersion.c_str()); return;
+            LOG_I(TAG, "Ya en la ultima version (%s)", m_currentVersion.c_str());
+            [session finishTasksAndInvalidate];
+            return;
         }
 
         LOG_I(TAG, "Nueva version encontrada: %s. Descargando dylib...", remoteVer.c_str());
         NSURL* dylibUrl = [NSURL URLWithString:downloadUrlStr];
-        downloadFile(dylibUrl, ^(NSString* dylibPath, NSError* dlError) {
+        downloadFile(session, dylibUrl, ^(NSString* dylibPath, NSError* dlError) {
             if (dlError || !dylibPath) {
                 LOG_E(TAG, "Error descargando dylib: %s",
                       [(dlError ? [dlError localizedDescription] : @"ruta invalida") UTF8String]);
+                [session finishTasksAndInvalidate];
                 return;
             }
             std::string actualSha = sha256OfFile(dylibPath);
@@ -83,47 +106,64 @@ void Updater::checkForUpdates() {
                 LOG_E(TAG, "SHA-256 no coincide (esperado %s, obtenido %s). Descartada.",
                       [expectedSha UTF8String], actualSha.c_str());
                 unlink([dylibPath fileSystemRepresentation]);
+                [session finishTasksAndInvalidate];
                 return;
             }
             if (applyUpdate([dylibPath fileSystemRepresentation]))
                 LOG_I(TAG, "Actualizacion %s lista para el proximo arranque.", remoteVer.c_str());
             else
                 LOG_E(TAG, "Fallo al aplicar la actualizacion.");
+            [session finishTasksAndInvalidate];
         });
     });
 }
 
-bool Updater::isTrustedURL(NSURL* url) {
+bool OtaUpdater::isTrustedURL(NSURL* url) {
     NSString* host = [[url host] lowercaseString];
     if (![[[url scheme] lowercaseString] isEqualToString:@"https"] || !host) return false;
-    return [host isEqualToString:@"github.com"] || [host hasSuffix:@".githubusercontent.com"];
+    return [host isEqualToString:@"github.com"] ||
+           [host hasSuffix:@".githubusercontent.com"];
 }
 
-void Updater::downloadFile(NSURL* url, void (^completion)(NSString*, NSError*)) {
+NSURLSession* OtaUpdater::makeSession() {
+    // Sesion efimera dedicada: aislada del sharedSession del juego.
+    NSURLSessionConfiguration* cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    cfg.timeoutIntervalForRequest  = 30.0;
+    cfg.timeoutIntervalForResource = 120.0;
+    return [NSURLSession sessionWithConfiguration:cfg];
+}
+
+void OtaUpdater::downloadFile(NSURLSession* session, NSURL* url,
+                               void (^completion)(NSString*, NSError*)) {
     if (!url || !isTrustedURL(url)) {
         completion(nil, makeError(@"URL no permitida (solo https a github.com)"));
         return;
     }
-    NSURLSessionDownloadTask* task = [[NSURLSession sharedSession] downloadTaskWithURL:url
+    NSURLSessionDownloadTask* task = [session downloadTaskWithURL:url
         completionHandler:^(NSURL* location, NSURLResponse* response, NSError* error) {
             if (error) { completion(nil, error); return; }
-            NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ?
-                [(NSHTTPURLResponse*)response statusCode] : 0;
+            NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]]
+                ? [(NSHTTPURLResponse*)response statusCode] : 0;
             if (status != 200) {
                 completion(nil, makeError([NSString stringWithFormat:@"HTTP %ld", (long)status]));
                 return;
             }
-            NSString* dest = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+            NSString* dest = [NSTemporaryDirectory()
+                stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
             NSError* fileError = nil;
-            [[NSFileManager defaultManager] moveItemAtURL:location toURL:[NSURL fileURLWithPath:dest] error:&fileError];
+            [[NSFileManager defaultManager] moveItemAtURL:location
+                                                    toURL:[NSURL fileURLWithPath:dest]
+                                                    error:&fileError];
             if (fileError) completion(nil, fileError);
             else           completion(dest, nil);
         }];
     [task resume];
 }
 
-std::string Updater::sha256OfFile(NSString* path) {
-    NSData* data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+std::string OtaUpdater::sha256OfFile(NSString* path) {
+    NSData* data = [NSData dataWithContentsOfFile:path
+                                          options:NSDataReadingMappedIfSafe
+                                            error:nil];
     if (!data) return "";
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256([data bytes], (CC_LONG)[data length], digest);
@@ -133,22 +173,21 @@ std::string Updater::sha256OfFile(NSString* path) {
     return hex;
 }
 
-bool Updater::applyUpdate(const std::string& newDylibPath) {
-    // Frameworks/ dentro del .app bundle no es escribible desde el proceso (macl post-ejecucion).
-    // Guardamos el update en el container writable; el usuario lo aplica con deploy.sh.
+bool OtaUpdater::applyUpdate(const std::string& newDylibPath) {
     NSString* docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
     std::string stagePath = [docs UTF8String];
     stagePath += "/FnMacBypass-update.dylib";
 
-    NSFileManager* fm  = [NSFileManager defaultManager];
-    NSString* stageNS  = [NSString stringWithUTF8String:stagePath.c_str()];
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* stageNS = [NSString stringWithUTF8String:stagePath.c_str()];
     [fm removeItemAtPath:stageNS error:nil];
 
     NSError* err = nil;
     if (![fm copyItemAtPath:[NSString stringWithUTF8String:newDylibPath.c_str()]
                     toPath:stageNS
                      error:&err]) {
-        LOG_E(TAG, "No se pudo copiar update al container: %s", [[err localizedDescription] UTF8String]);
+        LOG_E(TAG, "No se pudo copiar update al container: %s",
+              [[err localizedDescription] UTF8String]);
         return false;
     }
     chmod(stagePath.c_str(), 0755);
@@ -158,7 +197,7 @@ bool Updater::applyUpdate(const std::string& newDylibPath) {
     return true;
 }
 
-bool Updater::isVersionNewer(const std::string& remote, const std::string& local) {
+bool OtaUpdater::isVersionNewer(const std::string& remote, const std::string& local) {
     std::vector<long> r = parseVersion(remote);
     std::vector<long> l = parseVersion(local);
     size_t n = std::max(r.size(), l.size());

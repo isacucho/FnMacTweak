@@ -6,7 +6,9 @@
 #include "core/LogSpoofer.hpp"
 #include "core/SimulatorContext.hpp"
 #include "update/KickPatcher.hpp"
-#include "update/Updater.hpp"
+#include "update/OtaUpdater.hpp"
+#include "update/GameUpdater.hpp"
+#include "core/Config.hpp"
 #include "metadata/DeviceSpoof.hpp"
 #include "eos/EosHooks.hpp"
 #include "eos/MkwBypass.hpp"
@@ -56,12 +58,15 @@ __attribute__((constructor)) static void fncompat_init() {
         BOOT_PROBE("11_kickbypass_done");
         fndiag::install_customization_patch();
         BOOT_PROBE("12_custompatch_done");
+        fndiag::install_game_updater();
+        BOOT_PROBE("13_gameupdater_done");
 
-        // Updater: diferido 30s en background para no interferir con la conexion a Epic.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC),
-                       dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
-            Updater::getInstance().setUpdateConfig(UPDATE_MANIFEST_URL, MODULE_VERSION);
-            Updater::getInstance().checkForUpdates();
-        });
+        if (fndiag::config().autoupdate) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC),
+                           dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
+                OtaUpdater::getInstance().setConfig(UPDATE_MANIFEST_URL, MODULE_VERSION);
+                OtaUpdater::getInstance().checkForUpdates();
+            });
+        }
     }
 }
