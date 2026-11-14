@@ -42,7 +42,6 @@ CPP_SRC := \
     src/core/GameLogMirror.cpp \
     src/hooks/ObjcUtil.cpp \
     src/update/FileHooks.cpp \
-    src/update/SessionOverride.cpp \
     src/update/TerrainPatcher.cpp \
     src/update/KickPatcher.cpp \
     src/update/NmtPatcher.cpp \

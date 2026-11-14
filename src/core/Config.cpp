@@ -17,23 +17,18 @@ bool parse_bool(const char* v, bool fallback) {
 }
 
 void apply(const char* key, const char* value, Config& c) {
-    if (!strcmp(key, "foreground"))          c.foreground_sessions = parse_bool(value, c.foreground_sessions);
-    else if (!strcmp(key, "isolate_sessions"))c.isolate_sessions    = parse_bool(value, c.isolate_sessions);
-    else if (!strcmp(key, "create_dirs"))    c.create_dirs         = parse_bool(value, c.create_dirs);
-    else if (!strcmp(key, "relative_paths")) c.relative_paths      = parse_bool(value, c.relative_paths);
-    else if (!strcmp(key, "patch_status"))   c.patch_status        = parse_bool(value, c.patch_status);
-    else if (!strcmp(key, "verbose"))        c.verbose             = parse_bool(value, c.verbose);
-    else if (!strcmp(key, "trace_files"))    c.trace_files         = parse_bool(value, c.trace_files);
-    else if (!strcmp(key, "probe_input"))    c.probe_input         = parse_bool(value, c.probe_input);
-    else if (!strcmp(key, "input_ini"))      c.input_ini           = parse_bool(value, c.input_ini);
-    else if (!strcmp(key, "native_kbm"))     c.native_kbm          = parse_bool(value, c.native_kbm);
-    else if (!strcmp(key, "unlock_fps"))     c.unlock_fps          = parse_bool(value, c.unlock_fps);
+    if      (!strcmp(key, "relative_paths")) c.relative_paths = parse_bool(value, c.relative_paths);
+    else if (!strcmp(key, "patch_status"))   c.patch_status   = parse_bool(value, c.patch_status);
+    else if (!strcmp(key, "probe_input"))    c.probe_input    = parse_bool(value, c.probe_input);
+    else if (!strcmp(key, "input_ini"))      c.input_ini      = parse_bool(value, c.input_ini);
+    else if (!strcmp(key, "native_kbm"))     c.native_kbm     = parse_bool(value, c.native_kbm);
+    else if (!strcmp(key, "unlock_fps"))     c.unlock_fps     = parse_bool(value, c.unlock_fps);
     else if (!strcmp(key, "fps_target") && value) {
         int v = atoi(value);
         if (v >= 30 && v <= 240) c.fps_target = v;
     }
-    else if (!strcmp(key, "mirror_log"))     c.mirror_log          = parse_bool(value, c.mirror_log);
-    else if (!strcmp(key, "autoupdate"))     c.autoupdate          = parse_bool(value, c.autoupdate);
+    else if (!strcmp(key, "mirror_log"))     c.mirror_log     = parse_bool(value, c.mirror_log);
+    else if (!strcmp(key, "autoupdate"))     c.autoupdate     = parse_bool(value, c.autoupdate);
 }
 
 void load_file(Config& c, const std::string& path) {
@@ -66,20 +61,15 @@ Config load() {
     if (!dir.empty()) load_file(c, dir + "/FnDiag.conf");
     if (const char* home = getenv("HOME"))
         load_file(c, std::string(home) + "/Documents/FnDiag.conf");
-    apply("foreground",       getenv("FNDIAG_FOREGROUND"),        c);
-    apply("isolate_sessions", getenv("FNDIAG_ISOLATE_SESSIONS"),  c);
-    apply("create_dirs",      getenv("FNDIAG_CREATE_DIRS"),       c);
-    apply("relative_paths",   getenv("FNDIAG_RELATIVE_PATHS"),    c);
-    apply("patch_status",     getenv("FNDIAG_PATCH_STATUS"),      c);
-    apply("verbose",          getenv("FNDIAG_VERBOSE"),           c);
-    apply("trace_files",      getenv("FNDIAG_TRACE_FILES"),       c);
-    apply("probe_input",      getenv("FNDIAG_PROBE_INPUT"),       c);
-    apply("input_ini",        getenv("FNDIAG_INPUT_INI"),         c);
-    apply("native_kbm",       getenv("FNDIAG_NATIVE_KBM"),        c);
-    apply("unlock_fps",       getenv("FNDIAG_UNLOCK_FPS"),        c);
-    apply("fps_target",       getenv("FNDIAG_FPS_TARGET"),        c);
-    apply("mirror_log",       getenv("FNDIAG_MIRROR_LOG"),        c);
-    apply("autoupdate",       getenv("FNDIAG_AUTOUPDATE"),        c);
+    apply("relative_paths", getenv("FNDIAG_RELATIVE_PATHS"), c);
+    apply("patch_status",   getenv("FNDIAG_PATCH_STATUS"),   c);
+    apply("probe_input",    getenv("FNDIAG_PROBE_INPUT"),    c);
+    apply("input_ini",      getenv("FNDIAG_INPUT_INI"),      c);
+    apply("native_kbm",     getenv("FNDIAG_NATIVE_KBM"),     c);
+    apply("unlock_fps",     getenv("FNDIAG_UNLOCK_FPS"),     c);
+    apply("fps_target",     getenv("FNDIAG_FPS_TARGET"),     c);
+    apply("mirror_log",     getenv("FNDIAG_MIRROR_LOG"),     c);
+    apply("autoupdate",     getenv("FNDIAG_AUTOUPDATE"),     c);
     return c;
 }
 
