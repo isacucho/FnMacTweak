@@ -50,7 +50,8 @@ CPP_SRC := \
     src/input/InputIni.cpp \
     src/input/NativeKbm.cpp \
     src/eos/EosHooks.cpp \
-    src/eos/MkwBypass.cpp
+    src/eos/MkwBypass.cpp \
+    src/eos/CompatReport.cpp
 
 # Fuentes ObjC++ (compilados con -fobjc-arc)
 MM_SRC := \
@@ -63,7 +64,8 @@ MM_SRC := \
     src/update/OtaUpdater.mm \
     src/update/GameUpdater.mm \
     src/input/InputProbe.mm \
-    src/network/StatusCodeFix.mm
+    src/network/StatusCodeFix.mm \
+    src/network/NetInspect.mm
 
 HEADERS := $(shell find include -name '*.hpp')
 

@@ -29,6 +29,7 @@ void apply(const char* key, const char* value, Config& c) {
     }
     else if (!strcmp(key, "mirror_log"))     c.mirror_log     = parse_bool(value, c.mirror_log);
     else if (!strcmp(key, "autoupdate"))     c.autoupdate     = parse_bool(value, c.autoupdate);
+    else if (!strcmp(key, "net_inspect"))    c.net_inspect    = parse_bool(value, c.net_inspect);
 }
 
 void load_file(Config& c, const std::string& path) {
@@ -70,6 +71,7 @@ Config load() {
     apply("fps_target",     getenv("FNDIAG_FPS_TARGET"),     c);
     apply("mirror_log",     getenv("FNDIAG_MIRROR_LOG"),     c);
     apply("autoupdate",     getenv("FNDIAG_AUTOUPDATE"),     c);
+    apply("net_inspect",    getenv("FNDIAG_NET_INSPECT"),    c);
     return c;
 }
 

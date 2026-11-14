@@ -23,6 +23,9 @@ struct Config {
     bool mirror_log  = true;
     // Comprueba GitHub Releases y deja la dylib nueva para el siguiente arranque.
     bool autoupdate = false;
+    // Bypass de SSL certificate validation para inspeccion MITM (mitmproxy/Charles).
+    // ADVERTENCIA: desactiva TLS del proceso entero. Solo para sesiones de debug.
+    bool net_inspect = false;
 };
 
 const Config& config();
