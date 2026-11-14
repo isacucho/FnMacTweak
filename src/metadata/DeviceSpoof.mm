@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include "core/Logger.hpp"
+#include "core/DiagLog.hpp"
 #include "hooks/ObjcUtil.hpp"
 
 typedef void (*MSHookFunction_t)(void* symbol, void* replace, void** result);
@@ -259,6 +260,7 @@ static NSUInteger h_activeProcessorCount(id self, SEL _cmd) {
 static IMP o_isiOSAppOnMac = NULL;
 static BOOL h_isiOSAppOnMac(id self, SEL _cmd) {
     (void)self; (void)_cmd;
+    fndiag::log_line("[Spoof] isiOSAppOnMac swizzle called -> NO");
     return NO;
 }
 
@@ -297,35 +299,69 @@ static NSString* h_FIROptions_bundleID(id self, SEL _cmd) { (void)self; (void)_c
 // Breaks the selector so objc_msgSend returns nil/0 for any lazy call.
 // Runs from our constructor (dylib pos 40); only effective if EOSSDK
 // hasn't already cached YES from an early +load call (pos 25).
+// Scan the loaded EOSSDK image for the selector string "isiOSAppOnMac" and
+// overwrite the 'M' with 'X' so the selector becomes unknown to the ObjC
+// runtime. This prevents EOSSDK from learning it is on macOS and skipping
+// EAC client initialization. Dynamic scan is used instead of a hardcoded
+// offset so the patch survives EOSSDK updates within the same Fortnite build.
 static void patchEOSSDKSelectorString(void) {
     uint32_t n = _dyld_image_count();
+    bool found = false;
     for (uint32_t i = 0; i < n; i++) {
         const char* name = _dyld_get_image_name(i);
         if (!name || !strstr(name, "EOSSDK")) continue;
+        found = true;
 
+        const mach_header* mh = _dyld_get_image_header(i);
         intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        // isiOSAppOnMac string is at file offset 0xBE648F in EOSSDK __TEXT.
-        // 'M' is at +10. slide == load_base for a dylib with preferred base 0.
-        uint8_t* str = (uint8_t*)(slide + 0xBE648FL);
+        if (!mh) break;
 
-        if (memcmp(str, "isiOSAppOn", 10) != 0 || str[10] != 'M') {
-            LOG_I("Spoof", "EOSSDK selstr: unexpected bytes at 0x%tx (slide=0x%tx)", (uintptr_t)str, (uintptr_t)slide);
+        // Walk load commands to find all __TEXT sections and scan for the string.
+        const uint8_t* p = (const uint8_t*)mh + sizeof(mach_header_64);
+        static const char kTarget[] = "isiOSAppOnMac";
+        uint8_t* hit = nullptr;
+
+        for (uint32_t ci = 0; ci < ((const mach_header_64*)mh)->ncmds && !hit; ++ci) {
+            const load_command* lc = (const load_command*)p;
+            if (lc->cmd == LC_SEGMENT_64) {
+                const segment_command_64* seg = (const segment_command_64*)lc;
+                if (strncmp(seg->segname, "__TEXT", 16) == 0) {
+                    uintptr_t seg_start = (uintptr_t)(seg->vmaddr + slide);
+                    uintptr_t seg_end   = seg_start + seg->vmsize;
+                    // Scan the whole segment for the exact string.
+                    for (uintptr_t a = seg_start; a + sizeof(kTarget) <= seg_end; ++a) {
+                        if (memcmp((const void*)a, kTarget, sizeof(kTarget)) == 0) {
+                            hit = (uint8_t*)a;
+                            break;
+                        }
+                    }
+                }
+            }
+            p += lc->cmdsize;
+        }
+
+        if (!hit) {
+            fndiag::log_line("[Spoof] EOSSDK selstr: 'isiOSAppOnMac' no encontrado en __TEXT -- EOSSDK cambiado?");
             break;
         }
 
-        vm_address_t page = (vm_address_t)str & ~((vm_size_t)vm_page_size - 1);
+        vm_address_t page = (vm_address_t)hit & ~((vm_size_t)vm_page_size - 1);
         kern_return_t kr = vm_protect(mach_task_self(), page, (vm_size_t)vm_page_size,
                                       FALSE, VM_PROT_READ | VM_PROT_WRITE);
         if (kr != KERN_SUCCESS) {
-            LOG_I("Spoof", "EOSSDK selstr: vm_protect(W) failed kr=%d", kr);
+            fndiag::log_line("[Spoof] EOSSDK selstr: vm_protect(W) failed kr=%d", kr);
             break;
         }
-        str[10] = 'X'; // isiOSAppOnMac -> isiOSAppOnXac
-        __builtin___clear_cache((char*)str, (char*)str + 13);
+        uintptr_t file_off = (uintptr_t)hit - (uintptr_t)slide;
+        hit[10] = 'X'; // isiOSAppOnMac -> isiOSAppOnXac
+        __builtin___clear_cache((char*)hit, (char*)hit + (int)sizeof(kTarget));
         vm_protect(mach_task_self(), page, (vm_size_t)vm_page_size, FALSE, VM_PROT_READ);
-        LOG_I("Spoof", "EOSSDK selstr patched: isiOSAppOnMac->isiOSAppOnXac (slide=0x%tx)", (uintptr_t)slide);
+        fndiag::log_line("[Spoof] EOSSDK selstr patched at 0x%lx: isiOSAppOnMac->isiOSAppOnXac OK",
+                         (unsigned long)file_off);
         break;
     }
+    if (!found)
+        fndiag::log_line("[Spoof] EOSSDK selstr: EOSSDK no encontrado en imagen (cargado despues?)");
 }
 
 static IMP o_backgroundRefreshStatus = NULL;
@@ -410,7 +446,6 @@ void installSpoofHooks(void) {
                 if (syms[i] && repls[i] && origs[i])
                     MSHookFunction(syms[i], repls[i], origs[i]);
         }
-
         using fndiag::objc::swizzle;
         swizzle(NSClassFromString(@"NSProcessInfo"), @selector(activeProcessorCount), (IMP)h_activeProcessorCount, &o_activeProcessorCount);
         swizzle(NSClassFromString(@"NSProcessInfo"), @selector(isiOSAppOnMac),        (IMP)h_isiOSAppOnMac,         &o_isiOSAppOnMac);

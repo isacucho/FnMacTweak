@@ -153,8 +153,12 @@ static ReportFn   g_orig{nullptr};
 static uintptr_t* g_slot{nullptr};
 
 static int compat_hook(void* self, uint32_t type, const void* data, uint32_t flag) {
-    if (flag == 1 && (type == 5 || type == 19 || type == 23 || type == 49))
-        return 1;
+    fndiag::log_line("[CompatReport] report type=%u flag=%u", type, flag);
+    // type=10: sideload/JIT validation check (ValidationPatch conflict — same slot).
+    if (type == 10) return 1;
+    // Suppress ALL flag==1 reports (not just known types): flag==1 signals "failed"
+    // and any unknown type passing through could trigger the server kick.
+    if (flag == 1) return 1;
     return g_orig(self, type, data, flag);
 }
 

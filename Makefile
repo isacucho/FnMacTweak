@@ -25,11 +25,13 @@ else ifeq ($(CHANNEL),beta)
   DEBUG_FLAGS := -g
 else ifeq ($(CHANNEL),rc)
   DEFINES     += -DPRODUCTION
-  # -Wl,-x : elimina símbolos locales; -Wl,-S : elimina secciones __DWARF
-  STRIP_FLAGS := -Wl,-x -Wl,-S
+  OPT         := -O3
+  # -x: sin simbolos locales; -S: sin DWARF; -dead_strip: elimina codigo muerto
+  STRIP_FLAGS := -Wl,-x -Wl,-S -Wl,-dead_strip
 else ifeq ($(CHANNEL),public)
   DEFINES     += -DPRODUCTION
-  STRIP_FLAGS := -Wl,-x -Wl,-S
+  OPT         := -O3
+  STRIP_FLAGS := -Wl,-x -Wl,-S -Wl,-dead_strip
 endif
 
 OUTDIR  := builds/$(CHANNEL)
@@ -50,7 +52,6 @@ CPP_SRC := \
     src/input/InputIni.cpp \
     src/input/NativeKbm.cpp \
     src/eos/EosHooks.cpp \
-    src/eos/MkwBypass.cpp \
     src/eos/CompatReport.cpp
 
 # Fuentes ObjC++ (compilados con -fobjc-arc)
@@ -75,7 +76,8 @@ FLAGS := \
     $(DEFINES) \
     -std=c++17 $(OPT) $(DEBUG_FLAGS) \
     -Wall -Wextra -Werror \
-    -fvisibility=hidden
+    -fvisibility=hidden \
+    -fvisibility-inlines-hidden
 
 LDFLAGS := \
     -dynamiclib \
