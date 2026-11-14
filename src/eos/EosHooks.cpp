@@ -15,6 +15,7 @@
 
 #include "core/DiagLog.hpp"
 #include <dlfcn.h>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -67,8 +68,13 @@ static void* my_GetACClientIface(EOS_HPlatform Handle)
 // 0x01xx = platform/system integrity report - triggers server-side ghost mode on macOS.
 // We register a no-op callback so the game proceeds without blocking, but we never
 // forward these messages to the server (the server never learns the platform is macOS).
-static EOS_AntiCheatClient_OnMessageToServerCallback g_original_eac_cb = nullptr;
-static void* g_original_eac_cd = nullptr;
+// Atomic storage for the EAC outbound-message callback registered by the game.
+// Written by my_AddNotifyMsgToServer (called from EOS session-setup thread);
+// read by eac_msg_to_server_interceptor (called from EOS SDK callback threads).
+// Using uintptr_t for the function pointer because std::atomic requires a
+// trivially copyable type; the cast is safe on ARM64.
+static std::atomic<uintptr_t> g_original_eac_cb{0};
+static std::atomic<void*>     g_original_eac_cd{nullptr};
 
 static void eac_msg_to_server_interceptor(const void* /*ctx*/, const void* data, uint32_t len) {
     uint8_t msg_type = (len >= 1) ? ((const uint8_t*)data)[0] : 0xFF;
@@ -80,8 +86,10 @@ static void eac_msg_to_server_interceptor(const void* /*ctx*/, const void* data,
         return; // do not forward to original callback
     }
     fndiag::log_line("[EOS] AddNotify->server type=0x%02x len=%u", msg_type, len);
-    if (g_original_eac_cb)
-        g_original_eac_cb(g_original_eac_cd, data, len);
+    auto cb = reinterpret_cast<EOS_AntiCheatClient_OnMessageToServerCallback>(
+        g_original_eac_cb.load(std::memory_order_acquire));
+    if (cb)
+        cb(g_original_eac_cd.load(std::memory_order_acquire), data, len);
 }
 
 static EOS_EResult my_AddNotifyMsgToServer(
@@ -92,9 +100,10 @@ static EOS_EResult my_AddNotifyMsgToServer(
         fndiag::log_line("[EOS] AddNotifyMessageToServer opts=null");
         return orig_AddNotifyMsgToServer ? orig_AddNotifyMsgToServer(Handle, Options) : EOS_Success;
     }
-    // Save original callback and substitute our interceptor
-    g_original_eac_cb = Options->NotificationFn;
-    g_original_eac_cd = Options->ClientData;
+    // Save original callback and substitute our interceptor (atomic stores)
+    g_original_eac_cb.store(reinterpret_cast<uintptr_t>(Options->NotificationFn),
+                            std::memory_order_release);
+    g_original_eac_cd.store(Options->ClientData, std::memory_order_release);
 
     EOS_AntiCheatClient_AddNotifyMessageToServerOptions patched = *Options;
     patched.NotificationFn = eac_msg_to_server_interceptor;

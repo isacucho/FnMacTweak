@@ -4,13 +4,14 @@
 #include <mach-o/dyld.h>
 #include <cstdint>
 
+extern "C" void MSHookFunction(void* symbol, void* replace, void** result);
+
 namespace fndiag {
 namespace {
 
-// Stub tail-called by the island in place of execHandleCustomizationFailed.
-// Because HandleCustomizationFailed is a void UFunction, the stub just returns.
-// The counter NumLoadCustomizationFailed is never incremented -> server cannot
-// send reason=144 kicks.
+// Replacement for execHandleCustomizationFailed. Returns immediately so
+// NumLoadCustomizationFailed is never incremented and the server never sends
+// reason=144 kicks. Void return, no stack cleanup needed on ARM64.
 static void __attribute__((noinline, used)) customization_failed_stub() {}
 
 } // namespace
@@ -21,26 +22,24 @@ void install_customization_patch() {
         log_line("[CustomPatch] FAIL: no image header");
         return;
     }
-    uintptr_t base = (uintptr_t)mh;
+    uintptr_t base   = reinterpret_cast<uintptr_t>(mh);
+    uintptr_t fn_va  = base + kCustomFnOff;
 
-    // Verify the disk island is in place (patch_binary.py --apply must have run).
-    // Check the LDR word at island+4: LDR X16,[X16,#0x890] = 0xF9444A10.
-    auto* island = reinterpret_cast<const uint32_t*>(base + kCustomIslandOff);
-    if (island[1] != kCustomIslandLdr) {
-        log_line("[CustomPatch] island not found at 0x%lx (got 0x%08x, want 0x%08x)",
-                 (unsigned long)(base + kCustomIslandOff), island[1], kCustomIslandLdr);
-        log_line("[CustomPatch]   run: python3 tools/patch_binary.py --apply && bash tools/resign.sh");
+    // Sanity-check prologue to catch version mismatch early.
+    uint32_t prologue = *reinterpret_cast<const volatile uint32_t*>(fn_va);
+    if (prologue != kCustomFnPrologue) {
+        log_line("[CustomPatch] prologue mismatch at 0x%lx: got 0x%08x want 0x%08x "
+                 "-- kCustomFnOff needs updating for this build",
+                 (unsigned long)fn_va, prologue, kCustomFnPrologue);
         return;
     }
 
-    // Write stub address to __bss slot. The island reads this at dispatch time:
-    // nonzero -> tail-call our stub; zero -> execute original function.
-    auto* slot = reinterpret_cast<volatile uintptr_t*>(base + kCustomSlotOff);
-    *slot = reinterpret_cast<uintptr_t>(&customization_failed_stub);
+    MSHookFunction(reinterpret_cast<void*>(fn_va),
+                   reinterpret_cast<void*>(customization_failed_stub),
+                   nullptr);
 
-    log_line("[CustomPatch] armed: slot=0x%lx stub=0x%lx - NumLoadCustomizationFailed suppressed",
-             (unsigned long)(base + kCustomSlotOff),
-             (unsigned long)*slot);
+    log_line("[CustomPatch] hooked execHandleCustomizationFailed at 0x%lx via MSHookFunction "
+             "- NumLoadCustomizationFailed suppressed", (unsigned long)fn_va);
 }
 
 } // namespace fndiag

@@ -1,6 +1,57 @@
 # Estado de la investigacion
 
-## Estado actual (2026-11-13, V23.7.4 - dylib nuevo compilado y firmado)
+## Estado actual (2026-11-14, refactor in-memory + auditoria)
+
+### Refactor arquitectura in-memory (2026-11-14, V23.7.7)
+
+Eliminado disk patching por completo. Nueva arquitectura pura en memoria:
+
+6. **BNF via MSHookFunction** (NetFailurePatcher.cpp).
+   Reemplazada la disk-island scan + slot write por `MSHookFunction(base + 0x56c999c, bnf_bypass_stub, &g_orig_bnf)`.
+   Substrate parchea el prologo de BNF en __TEXT en runtime.
+   RIESGO: si AMFI mata el proceso (EXC_BAD_ACCESS, Namespace CODESIGNING Code 2) -> Substrate tiene la misma
+   restriccion que nuestro codigo directo con vm_protect(COPY). En ese caso restaurar disk island desde git.
+
+7. **CustomizationFailed via MSHookFunction** (CustomizationPatcher.cpp).
+   Reemplazada la island verification + slot write por `MSHookFunction(base + 0xa30b698, customization_failed_stub, nullptr)`.
+   Prologue verificado (0xA9F66FFC = STP X28,X27,[SP,#-0x50]!) antes de hookear.
+
+8. **tools/patch_binary.py eliminado**.
+   El script de disk patching ha sido borrado. El historial git conserva la version anterior.
+   deploy.sh ya no llama patch_binary.py.
+
+### Correcciones aplicadas (2026-11-14, auditoria bugs)
+
+Auditoria exhaustiva del codigo fuente. Bugs encontrados y corregidos:
+
+1. **CRITICO: install_customization_patch() nunca se llamaba** (Core.mm).
+   El disk island de HandleCustomizationFailed estaba en disco pero el slot __bss
+   siempre era 0 -> stub nunca se ejecutaba -> NumLoadCustomizationFailed no suprimido.
+   Fix: llamada añadida en Core.mm tras install_kick_bypass().
+
+2. **MEDIO: mach_timebase_info() en cada BNF call** (NetFailurePatcher.cpp).
+   Syscall al kernel en cada ConnectionLost durante el flood (~125/s). Cacheado en
+   g_kick_window_ticks, calculado una vez en install_net_failure_patch().
+
+3. **MENOR: dmb ish faltante** (CustomizationPatcher.cpp).
+   Barrera de memoria añadida tras escritura del slot __bss.
+
+4. **MENOR: g_original_eac_cb/cd sin atomic** (EosHooks.cpp).
+   Formal data race en multithreaded EOS SDK. Convertidos a std::atomic<>.
+
+5. **OBFUSCACION: -g siempre presente en todos los builds** (Makefile).
+   -g ahora solo en dev/beta. CHANNEL=public usa -Wl,-x -Wl,-S via STRIP_FLAGS.
+
+Referencia: rt-someone/FnMacTweak es un tweak QoL/input (120FPS, mouse), sin solapamiento
+con este repo. No tiene kick bypass, BNF patching ni EOS hooks.
+
+### Sin verificar en esta sesion
+- Partida completa con install_customization_patch() activo (slot ahora armado)
+- EAC interceptor tipo 0x01 en log real post-fix
+
+---
+
+## Estado (2026-11-13, V23.7.5 - fix BNF window 2000ms->5000ms)
 
 **Build activo: 43.10 (60278837). IPA reconstruido desde FortniteClient-IOS-Shipping.app. Instalado con Sideloadly.**
 
@@ -10,11 +61,13 @@
 - MkwBypass: 3/3 OK
 - KickBypass 43.10: 18/18 parchadas
 
-### Disk island: APLICADO (2026-11-13)
+### Disk island: APLICADO y BL callers PARCHADOS (2026-11-13)
 patch_binary.py actualizado para 43.10: BNF_OFFSET=0x56c999c, 6 BL callers, ISLAND_BYTES
-con ADRP #0x12d7d (slot 0x112d7f9c0 = __bss inicio 43.10). 6/6 call sites OK.
-IPA reconstruido: `/Users/alexg/Documents/Dev/Fortnite/Fortnite-43.10-fnpatch.ipa`
-Instalar con Sideloadly. Verificar `[NetFailurePatch] disk-island found` y `slot armed` en log.
+con ADRP #0x12d7d (slot 0x112d7f9c0 = __bss inicio 43.10).
+BUG CORREGIDO: branch state=='patched' no parchaba BL callers. Fix aplicado.
+6/6 call sites OK (island presente + callers redirigidos -> island).
+IPA v5: `/Users/alexg/Documents/Dev/Fortnite/Fortnite-43.10-fnpatch-v5.ipa`
+Instalar con Sideloadly. Verificar `[NetFailurePatch] ConnectionLost suppressed` en log.
 
 Nota: SPEC y CUSTOM islands NO parchados en 43.10 (sus fn offsets cambiaron).
 BeginSpectating y CustomizationFailed sin bypass de disco. Pendiente scan para 43.10.
@@ -24,6 +77,16 @@ El closure `AppDistributorWrapper.getCurrent` llama al stub de `MarketplaceKit.f
 (LC_LOAD_WEAK_DYLIB, no disponible en este macOS) -> puntero NULL -> pc=0x0 -> SIGSEGV 1s
 tras arranque. Fix: `rm -rf MarketplaceKitWrapper.framework` del bundle. Incorporado en
 resign.sh permanentemente (linea despues del xattr -cr).
+
+### Fixes en V23.7.6 (IPA v9, 2026-11-13)
+- kKickWindowNs 5000ms -> 30000ms: el flood del servidor es INDEFINIDO (~8ms/evento mientras no se desconecte).
+  PID 80434: kick=09:55:25.551, flood hasta 09:55:30.575 (5024ms). Ventana 5s expiraba 24ms antes. 3 escaparon.
+  Fix: 30s cubre el CT sintetico a t+25s. Tras lobby return, flood para naturalmente.
+- IPA v9: /Users/alexg/Documents/Dev/Fortnite/Fortnite-43.10-fnpatch-v9.ipa
+
+### Fixes en V23.7.5 (IPA v8, 2026-11-13)
+- kKickWindowNs 2000ms -> 5000ms: en PID 76831, kick=09:39:31.988, BNF flood hasta 09:39:34.020 (2032ms).
+- IPA v8: /Users/alexg/Documents/Dev/Fortnite/Fortnite-43.10-fnpatch-v8.ipa
 
 ### Fixes en V23.7.4 (/Applications, 2026-11-13)
 - VERSION: 23.7.4, ARM64 iOS17.0, compilado y firmado (VersionPlatform=2, CDHash=f096996e)

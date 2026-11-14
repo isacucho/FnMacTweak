@@ -7,9 +7,11 @@
 #include "core/SimulatorContext.hpp"
 #include "update/KickPatcher.hpp"
 #include "update/NetFailurePatcher.hpp"
+#include "update/CustomizationPatcher.hpp"
 #include "metadata/DeviceSpoof.hpp"
 #include "eos/EosHooks.hpp"
 #include "eos/MkwBypass.hpp"
+#include "network/EacHooks.hpp"
 
 #ifndef MODULE_VERSION
 #define MODULE_VERSION "1.0.0"
@@ -41,11 +43,15 @@ __attribute__((constructor)) static void fncompat_init() {
         BOOT_PROBE("6_validation_done");
         install_eos_hooks();
         BOOT_PROBE("7_eos_hooks_done");
+        installNetHooks();
+        BOOT_PROBE("7b_nethooks_done");
         install_mkw_hooks();
         BOOT_PROBE("8_mkw_hooks_done");
         fndiag::install_net_failure_patch();
         BOOT_PROBE("9_netfail_done");
         fndiag::install_kick_bypass();
         BOOT_PROBE("10_kickbypass_done");
+        fndiag::install_customization_patch();
+        BOOT_PROBE("11_custompatch_done");
     }
 }

@@ -9,13 +9,23 @@ SDK     := $(shell xcrun --sdk iphoneos --show-sdk-path)
 CXX     := xcrun --sdk iphoneos clang++
 TARGET  := arm64-apple-ios17.0
 
-OPT     := -O2
+OPT        := -O2
+DEBUG_FLAGS :=
+STRIP_FLAGS :=
 DEFINES := -DMODULE_VERSION=\"$(VERSION)\" -DUPDATE_MANIFEST_URL=\"$(MANIFEST_URL)\"
 ifeq ($(CHANNEL),dev)
-  OPT := -O0
-endif
-ifeq ($(CHANNEL),public)
-  DEFINES += -DPRODUCTION
+  OPT         := -O0
+  DEBUG_FLAGS := -g
+else ifeq ($(CHANNEL),beta)
+  DEBUG_FLAGS := -g
+else ifeq ($(CHANNEL),public)
+  DEFINES     += -DPRODUCTION
+  # Strip all local symbols and debug sections from the output dylib.
+  # -Wl,-x : remove local (non-exported) symbols
+  # -Wl,-S : strip debug info (__DWARF sections)
+  # Together these eliminate function names, source paths and line numbers
+  # from the distributed binary, complementing -fvisibility=hidden.
+  STRIP_FLAGS := -Wl,-x -Wl,-S
 endif
 
 OUTDIR  := builds/$(CHANNEL)
@@ -59,7 +69,7 @@ FLAGS := \
     -target $(TARGET) -isysroot $(SDK) \
     -I./include \
     $(DEFINES) \
-    -std=c++17 $(OPT) -g \
+    -std=c++17 $(OPT) $(DEBUG_FLAGS) \
     -Wall -Wextra -Werror \
     -fvisibility=hidden
 
@@ -68,6 +78,7 @@ LDFLAGS := \
     -install_name @rpath/$(NAME) \
     -Wl,-undefined,dynamic_lookup \
     -Wl,-w \
+    $(STRIP_FLAGS) \
     -framework Foundation \
     -framework CoreFoundation \
     -framework Security \

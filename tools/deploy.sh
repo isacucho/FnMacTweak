@@ -50,41 +50,11 @@ fi
 # Remove code signature first: com.apple.macl on the .app dir blocks ALL writes
 # (even by the file owner) once the app has been run. sudo codesign --remove-signature
 # disables the kernel's macl write-protection; xattr data remains but is no longer
-# enforced. This MUST run before any cp/write/patch_binary step.
+# enforced. This MUST run before any cp/write step.
 echo "Quitando firma para liberar macl write-protection..."
 sudo codesign --remove-signature "$APP" 2>&1 || true
 sudo xattr -cr "$APP" 2>/dev/null || true
 xattr -cr "$APP" 2>/dev/null || true
-
-# --- 0. Disk island patch (required for BNF hook) ---
-# BroadcastNetworkFailure is non-virtual: the only way to hook it without
-# AMFI kill is via a pre-patched island in Mach-O padding. Auto-apply here.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PATCH_PY="$SCRIPT_DIR/patch_binary.py"
-echo ""
-echo "[0/5] Verificando parche de isla en disco..."
-PATCH_STATE=$(python3 "$PATCH_PY" --verify 2>&1 | grep "^Island at" | awk '{print $NF}')
-echo "  Estado: $PATCH_STATE"
-if [ "$PATCH_STATE" = "unpatched" ]; then
-    echo "  Aplicando parche de isla (patch_binary.py --apply)..."
-    python3 "$PATCH_PY" --apply
-    echo "  Isla aplicada."
-elif [ "$PATCH_STATE" = "patched" ]; then
-    echo "  BNF island presente. Verificando islands adicionales..."
-    python3 "$PATCH_PY" --apply || true
-elif [ "$PATCH_STATE" = "patched_old" ]; then
-    echo "  Isla antigua detectada, actualizando..."
-    python3 "$PATCH_PY" --apply
-    echo "  Isla actualizada."
-elif [ "$PATCH_STATE" = "migrate" ]; then
-    echo "  Migrando isla de 0x29bc -> 0x29c0 (fix install_name_tool overlap)..."
-    python3 "$PATCH_PY" --apply
-    echo "  Migracion completada."
-else
-    echo "  Estado inesperado ($PATCH_STATE), intentando aplicar parche..."
-    python3 "$PATCH_PY" --apply && echo "  Parche aplicado." || echo "  AVISO: patch_binary.py --apply fallo, continua sin parche."
-fi
-
 
 # Copy to versioned destination
 echo "Copiando dylib..."
@@ -172,6 +142,5 @@ fi
 
 echo ""
 echo "=== Deploy completo. Ejecuta resign.sh antes de lanzar Fortnite. ==="
-echo "(Incluye parche de isla en disco. BNF hook activo tras resign + relaunch.)"
 echo "Para monitorizar el log en tiempo real:"
 echo "  tail -f '$LOG'"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# resign.sh - Re-firma el bundle tras patch_binary.py + deploy.sh
+# resign.sh - Re-firma el bundle tras deploy.sh
 # Ejecutar: bash tools/resign.sh
 set -euo pipefail
 

@@ -4,14 +4,14 @@
 
 #include <mach/mach.h>
 #include <mach/mach_time.h>
-#include <mach/vm_map.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
-#include <libkern/OSCacheControl.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <cstdint>
 #include <cstring>
 #include <atomic>
+
+extern "C" void MSHookFunction(void* symbol, void* replace, void** result);
 
 namespace fndiag {
 
@@ -25,9 +25,6 @@ static constexpr uintptr_t kBnfOffset     = 0x56c999cUL;
 static constexpr char     kBnfString[]    = "BroadcastNetworkFailure";
 // Scan budget: how far back to walk from ADRP+ADD to find function prologue
 static constexpr size_t   kMaxWalkback    = 0x8000U;
-// ARM64 encoding of island instructions (version-independent)
-static constexpr uint32_t kIslandCbzX16  = 0xB4000050U; // CBZ X16, +8 (skip BR if slot==0)
-static constexpr uint32_t kIslandBrX16   = 0xD61F0200U; // BR X16
 
 using BnfFn = void (*)(void* self, void* world, void* net_driver,
                         int32_t failure_type, void* error_string);
@@ -36,20 +33,19 @@ static BnfFn g_orig_bnf = nullptr;
 // kConnectionLost=3, kConnectionTimeout=4 (confirmed from ENetworkFailure strings)
 static constexpr int32_t kConnectionLost    = 3;
 static constexpr int32_t kConnectionTimeout = 4;
-// 500ms window in nanoseconds
-static constexpr uint64_t kKickWindowNs = 500ULL * 1000000ULL;
+// 30s window: flood is unbounded (server sends CL every ~8ms until disconnected).
+// synthetic CT fires at t+25s -> lobby return. 30s covers the full 25s + 5s buffer.
+static constexpr uint64_t kKickWindowNs = 30000ULL * 1000000ULL;
 // 25s synthetic ConnectionTimeout delay
 static constexpr double   kSyntheticDelaySecs = 25.0;
 
 // Guards against firing the synthetic CT more than once per kick event
 static std::atomic<bool> g_synthetic_pending{false};
 
-// Convert nanoseconds to mach_absolute_time ticks
-static uint64_t ns_to_mach(uint64_t ns) {
-    mach_timebase_info_data_t tb;
-    mach_timebase_info(&tb);
-    return ns * tb.denom / tb.numer;
-}
+// Kick window in mach_absolute_time ticks, computed once at init.
+// Avoids calling mach_timebase_info() (kernel trap) on every BNF invocation
+// during the CL flood (~125 calls/s during a kick event).
+static uint64_t g_kick_window_ticks = 0;
 
 static void bnf_bypass_stub(void* self, void* world, void* net_driver,
                               int32_t failure_type, void* error_string) {
@@ -58,7 +54,7 @@ static void bnf_bypass_stub(void* self, void* world, void* net_driver,
         uint64_t kick_at = g_last_kick_suppressed_at.load(std::memory_order_acquire);
         if (kick_at != 0) {
             uint64_t now = mach_absolute_time();
-            uint64_t window_ticks = ns_to_mach(kKickWindowNs);
+            uint64_t window_ticks = g_kick_window_ticks;
             if (now >= kick_at && (now - kick_at) <= window_ticks) {
                 log_line("[NetFailurePatch] ConnectionLost suppressed (within kick window)");
 
@@ -208,41 +204,14 @@ static uintptr_t find_bnf_via_string(uintptr_t text_start, size_t text_size,
     return 0;
 }
 
-// Patch a single 8-byte pointer slot in a DATA segment (vtable entry).
-static bool patch_data_ptr(uintptr_t slot_va, uintptr_t stub_va) {
-    mach_vm_address_t page = slot_va & ~((mach_vm_address_t)0x3FFFULL);
-    kern_return_t kr = vm_protect(mach_task_self(),
-                                  static_cast<vm_address_t>(page), 0x4000, false,
-                                  VM_PROT_READ | VM_PROT_WRITE);
-    if (kr != KERN_SUCCESS) {
-        log_line("[NetFailurePatch] vm_protect(DATA RW) FAIL kr=%d slot=0x%lx",
-                 kr, (long)slot_va);
-        return false;
-    }
-    *reinterpret_cast<volatile uintptr_t*>(slot_va) = stub_va;
-    __asm__ volatile("dmb ish" ::: "memory");
-    return true;
-}
-
-// Scan a DATA segment for 8-byte pointers equal to target_va, replace with stub_va.
-static int scan_seg(const segment_command_64* seg, uintptr_t slide,
-                     uintptr_t target_va, uintptr_t stub_va) {
-    uintptr_t start = seg->vmaddr + slide;
-    uintptr_t end   = start + seg->vmsize;
-    int n = 0;
-    for (uintptr_t addr = start; addr + 8 <= end; addr += 8) {
-        if (*reinterpret_cast<const volatile uintptr_t*>(addr) == target_va) {
-            if (patch_data_ptr(addr, stub_va)) {
-                ++n;
-                log_line("[NetFailurePatch] vtable patched 0x%lx (seg %.16s)",
-                         (long)addr, seg->segname);
-            }
-        }
-    }
-    return n;
-}
-
 void install_net_failure_patch() {
+    // Compute kick window in ticks once; avoids per-call mach_timebase_info() syscall.
+    if (g_kick_window_ticks == 0) {
+        mach_timebase_info_data_t tb;
+        mach_timebase_info(&tb);
+        g_kick_window_ticks = kKickWindowNs * tb.denom / tb.numer;
+    }
+
     const mach_header_64* mh =
         reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(0));
     if (!mh) { log_line("[NetFailurePatch] no image header"); return; }
@@ -294,114 +263,24 @@ void install_net_failure_patch() {
         return;
     }
 
-    uintptr_t stub_va = reinterpret_cast<uintptr_t>(bnf_bypass_stub);
+    // --- 3. Hook BNF via MSHookFunction ---
+    // Substrate patches the function prologue in __TEXT at runtime.
+    // g_orig_bnf receives the trampoline pointer for calling the original.
+    // NOTE: if AMFI kills the process on first execute of the patched page
+    // (EXC_BAD_ACCESS SIGKILL, Namespace CODESIGNING Code 2), Substrate's
+    // __TEXT write is AMFI-fatal on this build — same restriction as direct
+    // vm_protect(VM_PROT_COPY). In that case, the disk-island approach
+    // (patch_binary.py + deploy.sh) is the only viable path.
+    MSHookFunction(reinterpret_cast<void*>(bnf_va),
+                   reinterpret_cast<void*>(bnf_bypass_stub),
+                   reinterpret_cast<void**>(&g_orig_bnf));
 
-    // --- 3. Disk-island fast path: populate DATA slot, no __TEXT write needed ---
-    // patch_binary.py installs a 20-byte ADRP+LDR+CBZ+BR+RET island in the Mach-O
-    // padding before __TEXT,__text. Its LDR loads a pointer from a __bss slot (zero on
-    // disk) which we fill with stub_va at runtime. The BL call sites already point to
-    // this island after patch_binary.py runs. Writing the DATA slot arms the hook.
-    // __DATA has maxprot=rw- so patch_data_ptr() works; no __TEXT vm_protect needed.
-    //
-    // Dynamic island scan: instead of hardcoded offsets (kPaddingIslandOff, kDataSlotOff,
-    // kDiskIslandMagic), scan the Mach-O padding area for the ADRP+LDR+CBZ+BR pattern.
-    // This decouples the dylib from binary-specific constants that change each update.
-    // Only patch_binary.py needs re-running after an Epic update (no dylib recompile).
-    bool trampoline_armed = false;
-    {
-        // Padding: from end of load commands to start of __TEXT,__text.
-        // Subtract 16 bytes from the computed start: patch_binary.py may place the island
-        // up to one instruction (4 bytes) before sizeofcmds ends due to alignment slack.
-        // Starting 16 bytes early is harmless (we validate the full ADRP+LDR+CBZ+BR pattern).
-        uintptr_t pad_start_raw = base + sizeof(mach_header_64) +
-                              reinterpret_cast<const mach_header_64*>(mh)->sizeofcmds;
-        uintptr_t pad_start = (pad_start_raw >= base + 16) ? pad_start_raw - 16 : base;
-        uintptr_t pad_end   = text_start;
-        uintptr_t slot_va   = 0;
-
-        for (uintptr_t p = pad_start; p + 20 <= pad_end; p += 4) {
-            const uint32_t* w = reinterpret_cast<const uint32_t*>(p);
-            // w[0]: ADRP X16  -> bits[31,28:24]=1,10000; Rd=16(0x10)
-            if ((w[0] & 0x9F00001FU) != 0x90000010U) continue;
-            // w[1]: LDR X16, [X16, #imm12*8]  -> bits[31:22]=0b1111 1001 01, Rn=16, Rt=16
-            if ((w[1] & 0xFFC003FFU) != 0xF9400210U) continue;
-            // w[2]: CBZ X16, +8  = 0xB4000050
-            if (w[2] != kIslandCbzX16) continue;
-            // w[3]: BR X16  = 0xD61F0200
-            if (w[3] != kIslandBrX16)  continue;
-
-            // Decode DATA slot VA from ADRP + LDR
-            uint32_t immhi = (w[0] >> 5) & 0x7FFFFU;
-            uint32_t immlo = (w[0] >> 29) & 0x3U;
-            int64_t  imm21 = static_cast<int64_t>(
-                                 static_cast<int32_t>(((immhi << 2) | immlo) << 11)) >> 11;
-            uintptr_t adrp_res = (p & ~0xFFFULL) + (imm21 << 12);
-            uint32_t  imm12    = (w[1] >> 10) & 0xFFFU;
-            slot_va = adrp_res + (imm12 * 8);  // 64-bit LDR scales by 8
-            log_line("[NetFailurePatch] disk-island found at 0x%lx slot=0x%lx",
-                     (long)p, (long)slot_va);
-            break;
-        }
-
-        if (slot_va) {
-            if (patch_data_ptr(slot_va, stub_va)) {
-                g_orig_bnf = reinterpret_cast<BnfFn>(bnf_va);
-                trampoline_armed = true;
-                log_line("[NetFailurePatch] disk-island: slot 0x%lx -> stub (armed)",
-                         (long)slot_va);
-            } else {
-                log_line("[NetFailurePatch] disk-island: slot write FAILED 0x%lx", (long)slot_va);
-            }
-        } else {
-            log_line("[NetFailurePatch] disk island not found in padding [0x%lx,0x%lx) - __TEXT fallback",
-                     (long)pad_start, (long)pad_end);
-        }
-    }
-
-    // --- 4. __TEXT island fallback: DISABLED (AMFI fatal) ---
-    // vm_protect(VM_PROT_COPY) on __TEXT produces a COW page not covered by the
-    // binary's code signature. AMFI kills the process (EXC_BAD_ACCESS SIGKILL,
-    // Namespace CODESIGNING, Code 2 "Invalid Page") the first time the CPU fetches
-    // an instruction from that page. This is true even with get-task-allow present.
-    // The only valid hook path is the disk island installed by patch_binary.py.
-    // deploy.sh now calls patch_binary.py --apply automatically before each deploy.
-    if (!trampoline_armed) {
-        log_line("[NetFailurePatch] FATAL: disk island not found. "
-                 "Run: sudo bash tools/deploy.sh && bash tools/resign.sh");
-    }
-
-    // --- 6. Vtable scan: covers virtual-dispatch paths regardless of BL result ---
-    int vtable_patched = 0;
-    int scanned_segs   = 0;
-    const uint8_t* cmd_ptr =
-        reinterpret_cast<const uint8_t*>(mh) + sizeof(mach_header_64);
-    for (uint32_t ci = 0; ci < mh->ncmds; ++ci) {
-        const load_command* lc = reinterpret_cast<const load_command*>(cmd_ptr);
-        if (lc->cmd == LC_SEGMENT_64) {
-            const segment_command_64* seg =
-                reinterpret_cast<const segment_command_64*>(lc);
-            const char* name = seg->segname;
-            if ((strncmp(name, "__DATA_CONST", 12) == 0 ||
-                 strncmp(name, "__AUTH_CONST", 12) == 0 ||
-                 strncmp(name, "__DATA_DIRTY", 12) == 0 ||
-                 strncmp(name, "__AUTH",        6) == 0 ||
-                 strncmp(name, "__DATA",        6) == 0) &&
-                seg->vmsize >= 8) {
-                ++scanned_segs;
-                vtable_patched += scan_seg(seg, slide, bnf_va, stub_va);
-            }
-        }
-        cmd_ptr += lc->cmdsize;
-    }
-    if (vtable_patched > 0 && !g_orig_bnf)
-        g_orig_bnf = reinterpret_cast<BnfFn>(bnf_va);
-
-    log_line("[NetFailurePatch] vtable: segs=%d patched=%d trampoline=%s",
-             scanned_segs, vtable_patched, trampoline_armed ? "yes" : "no");
-
-    if (!trampoline_armed && vtable_patched == 0) {
-        log_line("[NetFailurePatch] WARNING: no BL or vtable entries patched - "
-                 "ConnectionLost may not be intercepted");
+    if (g_orig_bnf) {
+        log_line("[NetFailurePatch] BNF hooked at 0x%lx via MSHookFunction (orig trampoline=0x%lx)",
+                 (long)bnf_va, (long)(uintptr_t)g_orig_bnf);
+    } else {
+        log_line("[NetFailurePatch] WARNING: MSHookFunction returned null orig for BNF 0x%lx",
+                 (long)bnf_va);
     }
 }
 

@@ -37,10 +37,11 @@ Cadena confirmada en binario:
 - `UEngine::BroadcastNetworkFailure: FailureType = %ls, ErrorString = %ls` -> log UE5 del path de fallo
 - Funcion BNF en file offset 0x56c999c, prologue: `ff 03 02 d1` = `SUB SP, SP, #0x80` (ARM64 ✓)
 
-**BYPASS activo (disk island + NetFailurePatcher):**
-- Disk island en 0x29c0: `f06b09b0 10e244f9 500000b4 00021fd6 c0035fd6` = ADRP X16 + LDR X16 + CBZ X16 + BR X16 + RET
-- bnf_bypass_stub: suprime ConnectionLost dentro de 500ms de g_last_kick_suppressed_at
-- Synthetic CT despachado a t+25s via dispatch_after(main_queue)
+**BYPASS activo (MSHookFunction + NetFailurePatcher, refactor 2026-11-14):**
+- `MSHookFunction(base + 0x56c999c, bnf_bypass_stub, &g_orig_bnf)` - Substrate parchea prologo en __TEXT
+- bnf_bypass_stub: suprime ConnectionLost dentro de ventana kick; synthetic CT a t+25s via dispatch_after
+- RIESGO AMFI: si Substrate usa vm_protect(COPY) en __TEXT -> mismo kill que nuestro codigo directo (ver PITFALLS v2.1.11)
+- Si crash con EXC_BAD_ACCESS Namespace CODESIGNING Code 2: volver a disk island (patch_binary.py archivado en git)
 
 ### ClientWasKicked (kick RPC)
 
@@ -85,6 +86,75 @@ por contacto "Michau" via Discord u otro canal externo al repo).
 
 ---
 
+## AUDITORIA 2026-11-14: hallazgos y correcciones
+
+### BUG CRITICO (CORREGIDO): install_customization_patch() nunca se llamaba
+
+`Core.mm` omitia la llamada a `fndiag::install_customization_patch()`. El disk island de
+HandleCustomizationFailed estaba correctamente instalado en disco (patch_binary.py --apply),
+pero el slot __bss nunca se armaba con la direccion del stub. La isla siempre tomaba el
+path execute_original (CBZ X16, slot==0 siempre cierto) y la funcion ejecutaba normalmente,
+incrementando NumLoadCustomizationFailed sin restriccion.
+FIX: añadida llamada en Core.mm despues de install_kick_bypass() con BOOT_PROBE "11_custompatch_done".
+
+### BUG MEDIO (CORREGIDO): mach_timebase_info() en cada llamada a bnf_bypass_stub
+
+Durante el flood de ConnectionLost (~125 llamadas/s mientras dura el kick), `bnf_bypass_stub`
+llamaba `mach_timebase_info()` en cada iteracion para convertir kKickWindowNs a ticks.
+Cada llamada es un trap al kernel. Innecesario: el timebase no cambia en runtime.
+FIX: g_kick_window_ticks calculado una vez en install_net_failure_patch() y reutilizado.
+
+### BUG MENOR (CORREGIDO): dmb ish faltante en CustomizationPatcher
+
+Escritura del slot __bss en install_customization_patch() carecia de barrera de memoria.
+Sin dmb ish, otro CPU ejecutando la isla podria ver el slot a 0 (valor anterior) aunque
+el dylib ya hubiera escrito el stub address. El slot se escribe en el constructor, antes de
+que el game thread pueda disparar la funcion, pero la barrera es semanticamente correcta.
+FIX: añadido __asm__ volatile("dmb ish") inmediatamente despues de la escritura del slot.
+
+### BUG MENOR (CORREGIDO): g_original_eac_cb/cd sin proteccion atomica
+
+`eac_msg_to_server_interceptor` y `my_AddNotifyMsgToServer` pueden ejecutar en hilos
+distintos del EOS SDK. Las variables globales `g_original_eac_cb` y `g_original_eac_cd`
+se leian/escribian sin atomics (formal data race).
+FIX: convertidas a std::atomic<uintptr_t> y std::atomic<void*> con acquire/release.
+
+### OBFUSCACION (CORREGIDO): -g siempre presente en todos los builds
+
+El Makefile incluia `-g` incondicionalmente, incrustando secciones __DWARF en la dylib
+incluso en builds public (nombres de funcion, rutas de fuente, numero de linea). Esto
+anula completamente el efecto de -fvisibility=hidden para simbolos internos.
+FIX: `-g` solo se pasa en CHANNEL=dev y CHANNEL=beta via DEBUG_FLAGS.
+Tambien anadido STRIP_FLAGS=-Wl,-x -Wl,-S para CHANNEL=public.
+REGLA: `make PRODUCTION=1` (public) produce dylib sin DWARF; `make DEV=1` mantiene -g.
+
+### rt-someone/FnMacTweak - sin solapamiento con este repo
+
+El repo referenciado es un tweak QoL/input para Theos (120FPS, mouse lock, device spoof via
+fishhook/sysctl). No implementa kick bypass, BNF patching, vtable patching, EOS hooks ni
+atomic-slot patching. No hay patrones de concurrencia a adoptar ni conflictos posibles.
+Los offsets del JadedFix (ValidationPatch vtable) y los nuestros tienen mutual exclusion:
+el check `if (current != expected) return false` en ambos impide double-patch.
+
+### 7 dias de re-firma (plan gratuito) - estrategias
+
+Opciones sin pagar $99/año:
+1. AltStore + AltServer (wifi pairing en la misma red): AltServer re-firma en background
+   cuando el iPhone esta en la misma red. Configurar en Ajustes > AltStore > Background Refresh.
+2. SideStore + SideServer (via WireGuard): re-firma remota sin necesidad de proximidad fisica.
+   SideStore expone un OTA URL; desde el Mac, `sideserver` hace push de la re-firma.
+3. Script launchd local: detectar expiry proxima con `codesign -d --verbose dist/FnMacBypass.dylib`
+   y ejecutar resign.sh automaticamente. Fortnite debe estar cerrado durante la re-firma.
+   Esqueleto del plist (editar dates y paths):
+   ~/Library/LaunchAgents/com.alexgrdev.fnresign.plist con ProgramArguments=[resign.sh] y
+   StartCalendarInterval cada 6 dias a las 03:00.
+4. Paid tier ($99/year): certificados de 1 año, elimina el problema.
+La opcion 1 (AltStore) es la mas sencilla para un free account con dispositivo fisico.
+Para IPA reconstruidos, resign.sh ya maneja la firma ad-hoc; la automatizacion AltStore se
+aplica al IPA instalado con Sideloadly, no al binario en /Applications.
+
+---
+
 ## RESUELTO (2026-11-13): IPA con estructura macOS wrapper - Sideloadly rechaza
 
 Sideloadly exige `Payload/<App>.app/Info.plist` directamente. El wrapper macOS de Fortnite
@@ -111,6 +181,34 @@ deploy.sh aplica `patch_binary.py --apply` sobre el binario instalado en
 SIN haber ejecutado deploy.sh primero, el disco island no estara en el IPA.
 Sideloadly instala el binario limpio y el disk island se pierde.
 Orden correcto: deploy.sh -> resign.sh -> (si necesitas IPA) construirlo ahora.
+
+## BUG CRITICO CORREGIDO (2026-11-13): BL callers NO parchados aunque island presente
+
+### Sintoma
+FnDiag.log muestra `disk-island found` y `slot armed` pero NUNCA aparece
+`ConnectionLost suppressed` ni `synthetic ConnectionTimeout firing`. bnf_bypass_stub
+nunca se ejecuta. Los kicks tardan 90s (UNetConnection timeout) en lugar de 25s.
+
+### Causa
+`patch_binary.py apply_patch()` tenia un bug en el branch `state=='patched'`:
+cuando el island ya existia en 0x29c0, el script asumia que los BL callers ya
+estaban redirigidos y los saltaba completamente. Resultado: island instalado pero
+los 6 callers siguen apuntando a BNF directamente.
+
+Verificado con BL scan: 6 BL->BNF (orig_bl), 0 BL->island (new_bl).
+
+### Fix
+Branch `state=='patched'` ahora itera BL_PATCHES y parchea callers con orig_bl:
+```python
+for fo, new_bl, orig_bl in BL_PATCHES:
+    if bytes(data[fo:fo+4]) == orig_bl:
+        data[fo:fo+4] = new_bl  # redirect to island
+```
+Despues del fix: `python3 tools/patch_binary.py --verify` muestra 6/6 `[OK]`.
+
+### IPA con callers parchados
+`Fortnite-43.10-fnpatch-v5.ipa` - verificado: island OK + 6/6 callers->island.
+Instalar con Sideloadly antes de probar BNF.
 
 ---
 
@@ -278,6 +376,11 @@ v2.0.34 (Z bump: fix en network failure path).
       ConnectionTimeout bypasa nuestro hook (distinto BL site en UNetConnection::Tick).
       kConnectionTimeout=4 confirmado por inspeccion directa del bloque ENetworkFailure
       strings en el binario (orden: 3=ConnectionLost 4=ConnectionTimeout).
+- [x] V23.7.6 BNF FLOOD INDEFINIDO: el servidor manda CL cada ~8ms sin limite de tiempo mientras el cliente
+      no se desconecte. kKickWindowNs de 5s expiraba antes que el CT sintetico (25s). PID 80434: 3 eventos
+      a +5007ms/+5015ms/+5024ms escaparon -> NCL dialog antes del CT sintetico.
+      FIX: kKickWindowNs = 30s. Cubre todo el periodo hasta CT sintetico (25s) + 5s de margen.
+      REGLA: kKickWindowNs debe ser > kSyntheticCtDelayS * 1000 (actualmente 25s -> minimo 25001ms).
 - [x] V2.1.27: synthetic ConnectionTimeout via dispatch_after(25s, main_queue). VERIFICADO
       2026-11-10: "[NetFailurePatch] synthetic ConnectionTimeout firing (25s early)" aparece
       a exactamente dk=25s. Lobby return limpio sin NCL screen. EXITO.
