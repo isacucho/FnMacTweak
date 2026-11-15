@@ -34,7 +34,18 @@ typedef void (*EOS_Sessions_OnEndSessionCallback)(const void*);
 typedef struct { int32_t ApiVersion; const char* SessionName; } EOS_Sessions_DestroySessionOptions;
 typedef void (*EOS_Sessions_OnDestroySessionCallback)(const void*);
 
+typedef void*   EOS_HConnect;
+typedef struct { int32_t ApiVersion; const char* Token; int32_t Type; } EOS_Connect_Credentials;
+typedef struct { int32_t ApiVersion; const EOS_Connect_Credentials* Credentials; const void* UserLoginInfo; } EOS_Connect_LoginOptions;
+typedef struct { int32_t ApiVersion; } EOS_Connect_CreateDeviceIdOptions;
+typedef struct { EOS_EResult ResultCode; void* ClientData; void* LocalUserId; void* ContinuanceToken; } EOS_Connect_LoginCallbackInfo;
+typedef void (*EOS_Connect_OnLoginCallback)(const EOS_Connect_LoginCallbackInfo*);
+typedef struct { EOS_EResult ResultCode; void* ClientData; } EOS_Connect_CreateDeviceIdCallbackInfo;
+typedef void (*EOS_Connect_OnCreateDeviceIdCallback)(const EOS_Connect_CreateDeviceIdCallbackInfo*);
+typedef void (*fn_ConnectLogin)(EOS_HConnect, const EOS_Connect_LoginOptions*, void*, EOS_Connect_OnLoginCallback);
+typedef void (*fn_ConnectCreateDeviceId)(EOS_HConnect, const EOS_Connect_CreateDeviceIdOptions*, void*, EOS_Connect_OnCreateDeviceIdCallback);
 typedef void*    EOS_HPlatform;
+typedef EOS_HConnect (*fn_GetConnectIface)(EOS_HPlatform);
 typedef int32_t  EOS_Application_Status;
 static const EOS_Application_Status EOS_AS_BackgroundSuspended = 2;
 static const EOS_Application_Status EOS_AS_Foreground          = 3;
@@ -61,6 +72,9 @@ static fn_PollStatus    orig_PollStatus    = nullptr;
 static fn_EndSession    orig_EndSession    = nullptr;
 static fn_DestroySession orig_DestroySession = nullptr;
 static fn_RecvMsg       orig_RecvMsg       = nullptr;
+static fn_ConnectLogin           orig_ConnectLogin           = nullptr;
+static fn_ConnectCreateDeviceId  orig_ConnectCreateDeviceId  = nullptr;
+static fn_GetConnectIface        orig_GetConnectIface        = nullptr;
 
 static EOS_EResult my_SetApplicationStatus(EOS_HPlatform Handle, EOS_Application_Status Status)
 {
@@ -226,6 +240,60 @@ static EOS_EResult my_DestroySession(
     return r;
 }
 
+static void my_connect_login_cb_wrapper(const EOS_Connect_LoginCallbackInfo* data);
+
+struct ConnectLoginCtx {
+    void* origClientData;
+    EOS_Connect_OnLoginCallback origCb;
+};
+
+static void my_connect_login_cb_wrapper(const EOS_Connect_LoginCallbackInfo* data) {
+    if (!data) return;
+    fndiag::log_line("[EOS] Connect_Login result=%d userId=%p continance=%p",
+                     (int)data->ResultCode, data->LocalUserId, data->ContinuanceToken);
+    auto* ctx = static_cast<ConnectLoginCtx*>(data->ClientData);
+    if (ctx && ctx->origCb) {
+        EOS_Connect_LoginCallbackInfo copy = *data;
+        copy.ClientData = ctx->origClientData;
+        ctx->origCb(&copy);
+    }
+    delete ctx;
+}
+
+static void my_ConnectLogin(EOS_HConnect Handle,
+                            const EOS_Connect_LoginOptions* Options,
+                            void* ClientData,
+                            EOS_Connect_OnLoginCallback Cb)
+{
+    if (Options && Options->Credentials)
+        fndiag::log_line("[EOS] Connect_Login ApiVer=%d credType=%d token=%s",
+                         Options->ApiVersion, Options->Credentials->Type,
+                         Options->Credentials->Token ? Options->Credentials->Token : "(nil)");
+    else
+        fndiag::log_line("[EOS] Connect_Login Options=%p", Options);
+
+    auto* ctx = new ConnectLoginCtx{ClientData, Cb};
+    if (orig_ConnectLogin)
+        orig_ConnectLogin(Handle, Options, ctx, my_connect_login_cb_wrapper);
+}
+
+static void my_ConnectCreateDeviceId(EOS_HConnect Handle,
+                                     const EOS_Connect_CreateDeviceIdOptions* Options,
+                                     void* ClientData,
+                                     EOS_Connect_OnCreateDeviceIdCallback Cb)
+{
+    fndiag::log_line("[EOS] CreateDeviceId called");
+    if (orig_ConnectCreateDeviceId)
+        orig_ConnectCreateDeviceId(Handle, Options, ClientData, Cb);
+}
+
+static EOS_HConnect my_GetConnectIface(EOS_HPlatform Handle)
+{
+    EOS_HConnect r = orig_GetConnectIface ? orig_GetConnectIface(Handle) : nullptr;
+    fndiag::log_line("[EOS] GetConnectInterface platform=%p -> connect=%p", Handle, r);
+    return r;
+}
+
 void install_eos_hooks() {
     void* eossdk = dlopen("@rpath/EOSSDK.framework/EOSSDK", RTLD_LAZY | RTLD_NOLOAD);
     if (!eossdk) {
@@ -243,6 +311,9 @@ void install_eos_hooks() {
         { "EOS_AntiCheatClient_ReceiveMessageFromServer", (void*)my_RecvMsgFromServer,         (void**)&orig_RecvMsg       },
         { "EOS_Sessions_EndSession",                      (void*)my_EndSession,                (void**)&orig_EndSession    },
         { "EOS_Sessions_DestroySession",                  (void*)my_DestroySession,            (void**)&orig_DestroySession},
+        { "EOS_Connect_Login",                            (void*)my_ConnectLogin,              (void**)&orig_ConnectLogin          },
+        { "EOS_Connect_CreateDeviceId",                   (void*)my_ConnectCreateDeviceId,     (void**)&orig_ConnectCreateDeviceId },
+        { "EOS_Platform_GetConnectInterface",             (void*)my_GetConnectIface,           (void**)&orig_GetConnectIface       },
     };
 
     for (auto& h : hooks) {

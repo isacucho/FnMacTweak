@@ -4,6 +4,48 @@ One issue at a time. Do not advance to the next until the current one is resolve
 
 ---
 
+
+## BUG (2026-11-15): bWasSuccess=0 en todos los downloads, bloqueo install bundle manager
+### Causa
+En iOS el sandbox pre-crea `PersistentDownloadDir/BackgroundHttp/<build>/` durante el setup
+del container. En macOS Catalyst el container sale vacio: el juego crea `BackgroundHttp/URLMap/`
+pero no `BackgroundHttp/++Fortnite+Release-43.10/`. NSURLSessionDownloadTask::didFinishDownloadingToURL
+intenta mover el temporal descargado a esa ruta; como el directorio padre no existe, el move
+falla y el sistema devuelve `bWasSuccess=0`. Todos los chunks quedan como fallidos -> LD=-1
+en la barra de estado -> install bundle manager bloqueado -> ESP-CON-000 (juego no puede
+avanzar al lobby sin instalacion completa).
+### Fix (V23.8.6)
+ContentPatch.mm: `create_missing_sandbox_dirs()` crea el directorio en startup con
+`createDirectoryAtPath:withIntermediateDirectories:YES`. Se loguea como
+`[ContentPatch] sandbox dir ready`.
+
+## BUG (2026-11-15): ESP-CON-000 loop tras borrar el container
+
+### Sintoma
+
+Al borrar el container y relanzar el juego, aparece "An error occurred while connecting
+to Epic servers. ESP-CON-000 Retrying in N" de forma indefinida.
+
+### Causa
+
+nsurlsessiond almacena el estado de las background sessions en
+`~/Library/Caches/com.apple.nsurlsessiond/` fuera del Data/ del container.
+Al borrar el container y relanzar, el juego reconecta su background session al mismo
+identificador y nsurlsessiond entrega las tasks pendientes del container anterior.
+Esas tasks referencian archivos temporales que ya no existen -> bWasSuccess=0.
+El motor interpreta este fallo como un error de conexion a Epic -> ESP-CON-000 loop.
+
+### Fix (V23.8.5)
+
+ContentPatch.mm: `purge_stale_bg_tasks()` al arranque cancela todas las tasks pendientes
+en nsurlsessiond para los 7 identificadores conocidos y luego invalida la sesion.
+Bloquea el constructor hasta 2s con dispatch_group para garantizar que el juego empieza
+con estado limpio. El enfoque V23.8.3 (foreground_sessions = true) convertia todas las BG
+sessions a default permanentemente, rompiendo la deteccion de descargas de FnMacAssistant.
+Config::foreground_sessions sigue disponible pero ahora default=false.
+
+---
+
 ## RUNTIME PROTECTION AUDIT (2026-11-13, build 60278837 / 43.10)
 
 Static analysis of `/Applications/Fortnite.app/Wrapper/FortniteClient-IOS-Shipping.app/FortniteClient-IOS-Shipping`

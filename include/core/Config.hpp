@@ -26,6 +26,10 @@ struct Config {
     // Bypass de SSL certificate validation para inspeccion MITM (mitmproxy/Charles).
     // ADVERTENCIA: desactiva TLS del proceso entero. Solo para sesiones de debug.
     bool net_inspect = false;
+    // Downgrade background NSURLSession a default (in-process) para evitar que nsurlsessiond
+    // entregue tasks stale del container anterior. Desactivado por defecto: se prefiere el
+    // purge en startup (ver install_content_patch). Solo activar para debug.
+    bool foreground_sessions = false;
 };
 
 const Config& config();
