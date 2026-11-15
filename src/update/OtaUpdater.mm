@@ -174,11 +174,26 @@ std::string OtaUpdater::sha256OfFile(NSString* path) {
 }
 
 bool OtaUpdater::applyUpdate(const std::string& newDylibPath) {
-    NSString* docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+    NSString* home = NSHomeDirectory();
+    if (!home) {
+        LOG_E(TAG, "NSHomeDirectory() devolvio nil");
+        return false;
+    }
+    NSString* docs = [home stringByAppendingPathComponent:@"Documents"];
+    NSFileManager* fm = [NSFileManager defaultManager];
+
+    NSError* mkdirErr = nil;
+    if (![fm createDirectoryAtPath:docs
+           withIntermediateDirectories:YES
+                            attributes:nil
+                                 error:&mkdirErr]) {
+        LOG_E(TAG, "No se pudo crear Documents/: %s",
+              [[mkdirErr localizedDescription] UTF8String]);
+        return false;
+    }
+
     std::string stagePath = [docs UTF8String];
     stagePath += "/FnMacBypass-update.dylib";
-
-    NSFileManager* fm = [NSFileManager defaultManager];
     NSString* stageNS = [NSString stringWithUTF8String:stagePath.c_str()];
     [fm removeItemAtPath:stageNS error:nil];
 

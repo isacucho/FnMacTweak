@@ -15,7 +15,7 @@ std::atomic<uint64_t> g_last_kick_suppressed_at{0};
 static bool patch_vtable_entry(mach_vm_address_t va, uintptr_t expected, uintptr_t replacement) {
     uintptr_t current = *reinterpret_cast<volatile uintptr_t*>(va);
     if (current != expected) {
-        log_line("[ValidationPatch]   skip vtable[0x%lx]: val=0x%lx != expected=0x%lx",
+        log_line("[KickBypass]   skip vtable[0x%lx]: val=0x%lx != expected=0x%lx",
                  (long)va, (long)current, (long)expected);
         return false;
     }
