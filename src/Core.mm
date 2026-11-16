@@ -10,6 +10,7 @@
 #include "update/CustomizationPatcher.hpp"
 #include "network/StatusCodeFix.hpp"
 #include "core/OsLogInterceptor.hpp"
+#include "gpu/MetalPurge.hpp"
 
 __attribute__((constructor)) static void fncompat_init() {
     @autoreleasepool {
@@ -27,5 +28,6 @@ __attribute__((constructor)) static void fncompat_init() {
         fndiag::install_customization_patch();
         install_status_code_fix();
         fndiag::install_compat_report();
+        fndiag::install_metal_purge();
     }
 }

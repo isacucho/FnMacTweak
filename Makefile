@@ -66,7 +66,8 @@ MM_SRC := \
     src/update/GameUpdater.mm \
     src/input/InputProbe.mm \
     src/network/StatusCodeFix.mm \
-    src/network/NetInspect.mm
+    src/network/NetInspect.mm \
+    src/gpu/MetalPurge.mm
 
 HEADERS := $(shell find include -name '*.hpp')
 
@@ -90,7 +91,8 @@ LDFLAGS := \
     -framework Foundation \
     -framework CoreFoundation \
     -framework Security \
-    -framework GameController
+    -framework GameController \
+    -framework Metal
 
 all: dev
 
