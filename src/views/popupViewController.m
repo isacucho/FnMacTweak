@@ -4537,7 +4537,7 @@ static NSString *getControllerButtonName(NSInteger idx) {
 // ── UISwitch toggle — immediate, no staging ───────────────────────────────────
 - (void)controllerModeToggled:(UISwitch *)sw {
   isControllerModeEnabled = sw.isOn;
-  [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:kControllerModeKey];
+  [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:kVirtualControllerModeKey];
   saveControllerMappings();
 }
 
@@ -6657,7 +6657,7 @@ static void setShapeBorder(UIView *view, CGFloat radius, CGFloat width,
       }
       if (importData[@"controllerMode"] != nil) {
         [[NSUserDefaults standardUserDefaults] setBool:[importData[@"controllerMode"] boolValue]
-                                                forKey:kControllerModeKey];
+                                                forKey:kVirtualControllerModeKey];
       }
 
       // Apply Fortnite Default Keybinds
