@@ -1900,10 +1900,7 @@ static void setupHIDManager() {
 
     if (_CGEventTapCreate && _CGEventTapEnable) {
         uint64_t keyboardMask = (1ULL << 10) | (1ULL << 11) | (1ULL << 12); // KeyDown, KeyUp, FlagsChanged
-        uint64_t mouseMask = (1ULL << 5) |  // kCGEventMouseMoved
-                             (1ULL << 6) |  // kCGEventLeftMouseDragged
-                             (1ULL << 7) |  // kCGEventRightMouseDragged
-                             (1ULL << kCGEventOtherMouseDown) | (1ULL << kCGEventOtherMouseUp) | (1ULL << kCGEventOtherMouseDragged);
+        uint64_t mouseMask = (1ULL << kCGEventOtherMouseDown) | (1ULL << kCGEventOtherMouseUp) | (1ULL << kCGEventOtherMouseDragged);
         CFMachPortRef eventTap = _CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
                                                   keyboardMask | mouseMask,
                                                   mouseButtonTapCallback, NULL);
@@ -3052,7 +3049,11 @@ static void updateMouseLock(BOOL value, CGPoint warpPos) {
             atomic_store(&mouseAccumBufferY[0], 0);
             atomic_store(&mouseAccumBufferY[1], 0);
         } else if (isMouseLocked) {
-            // MOUSE-TO-GYRO MODE: Integrate into accumulators for ue_reflection
+            // Pass deltas directly to the game's handler for camera control.
+            // Cursor stays fixed (CGAssociateMouseAndMouseCursorPosition(0));
+            // only the in-game camera reacts. Also accumulate for the gyro
+            // synthesis path as a fallback.
+            handler(eventMouse, deltaX, deltaY);
             int idx = atomic_load(&activeBufferIdx);
             atomic_add_double(&mouseAccumBufferX[idx], (double)deltaX);
             atomic_add_double(&mouseAccumBufferY[idx], (double)deltaY);

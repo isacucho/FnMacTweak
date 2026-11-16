@@ -137,12 +137,22 @@ static CMRotationRate hooked_dm_rotationRate(id self, SEL _cmd) {
     return sampleMouseRotationRate();
 }
 
+static BOOL hooked_isDeviceMotionAvailable(id __unused self, SEL __unused _cmd) { return YES; }
+static BOOL hooked_isGyroscopeAvailable(id __unused self, SEL __unused _cmd) { return YES; }
+
 void ue_init_gyro_hooks(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         // The old Unreal orientation interposition did not preserve its original
         // implementation or identify the owned controller. Leave it native.
         atomic_store(&g_godReflex.enabled, NO);
+
+        // On Mac Catalyst these return NO, preventing the game from starting
+        // device motion. Override to YES so motion polling is initiated.
+        Method availMethod = class_getInstanceMethod(NSClassFromString(@"CMMotionManager"), @selector(isDeviceMotionAvailable));
+        if (availMethod) method_setImplementation(availMethod, (IMP)hooked_isDeviceMotionAvailable);
+        Method gyroMethod = class_getInstanceMethod(NSClassFromString(@"CMMotionManager"), @selector(isGyroscopeAvailable));
+        if (gyroMethod) method_setImplementation(gyroMethod, (IMP)hooked_isGyroscopeAvailable);
 
         Method gcMethod = class_getInstanceMethod(NSClassFromString(@"GCMotion"), @selector(rotationRate));
         if (gcMethod) {
