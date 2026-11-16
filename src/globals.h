@@ -37,6 +37,23 @@ extern NSString *g_virtualControllerStatus;
 
 #define kGyroMultiplierKey @"gyroMultiplier"
 #define kGCMouseDirectKey @"gcmouseDirectKey"
+// Native (direct) mouse mode settings, set through config import.
+// Dictionary: nativeSensX / nativeSensY / nativeAdsSens (percent, 100 = the
+// game's own speed) and nativeAlwaysOn (direct mode whenever the cursor is locked).
+#define kNativeMouseKey @"fnkbm.nativeMouse"
+extern float NATIVE_SENS_X;
+extern float NATIVE_SENS_Y;
+extern float NATIVE_ADS_SENS;
+extern BOOL NATIVE_ALWAYS_ON;
+void loadNativeMouseSettings(void);
+// The tweak's own keys (HID key codes). Defaults 8, 9, 0 so that every letter
+// key stays free for the game. Dictionary: typing / lock / panel.
+#define kFnKbmHotkeysKey @"fnkbm.hotkeys"
+extern GCKeyCode FNKBM_KEY_TYPING;  // toggles typing mode (raw input: binds off)
+extern GCKeyCode FNKBM_KEY_LOCK;    // locks / frees the cursor by hand
+extern GCKeyCode FNKBM_KEY_PANEL;   // opens the settings panel
+extern GCKeyCode FNKBM_KEY_FPS;     // switches the frame rate unlock on / off
+#define kFnKbmFpsUnlockKey @"fnkbm.fpsUnlock"
 
 typedef NS_ENUM(NSInteger, FnControllerButton) {
     FnCtrlButtonA        = 0,

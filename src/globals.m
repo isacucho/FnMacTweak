@@ -70,6 +70,10 @@ uint32_t g_vctrlSuppressionMap[10240] = {0};
 void updateVCtrlReverseMap(void) {
     memset(g_vctrlReverseMap, 0, sizeof(g_vctrlReverseMap));
     memset(g_vctrlSuppressionMap, 0, sizeof(g_vctrlSuppressionMap));
+    // With controller mode off nothing is routed to a virtual pad, so nothing
+    // may be suppressed for it. Leaving the default table in the suppression
+    // map swallowed W A S D, Space, R, Esc, Y and both mouse buttons.
+    if (!isControllerModeEnabled) return;
     for (int i = 0; i < FnCtrlButtonCount; i++) {
         int code = controllerMappingArray[i];
         if (code > 0 && code < 10240) {
@@ -117,7 +121,26 @@ void recalculateSensitivities() {
   adsSensitivityY = (BASE_XY_SENSITIVITY / 100.0) * (SCOPE_SENSITIVITY_Y / 100.0) * MACOS_TO_PC_SCALE;
 }
 
+float NATIVE_SENS_X = 100.0f;
+float NATIVE_SENS_Y = 100.0f;
+float NATIVE_ADS_SENS = 100.0f;
+BOOL NATIVE_ALWAYS_ON = YES;
+// No tweak shortcut keys and no panel in this build: 0 switches each one off.
+GCKeyCode FNKBM_KEY_TYPING = 0;
+GCKeyCode FNKBM_KEY_LOCK = 0;
+GCKeyCode FNKBM_KEY_PANEL = 0;
+GCKeyCode FNKBM_KEY_FPS = 0;      // no test key in this build
+
+void loadNativeMouseSettings(void) {
+  // The panel is gone, so values saved by an older build must not carry over:
+  // sensitivity and binds are set in the game's own settings pages.
+  NATIVE_SENS_X = NATIVE_SENS_Y = NATIVE_ADS_SENS = 100.0f;
+  NATIVE_ALWAYS_ON = YES;
+  FNKBM_KEY_TYPING = FNKBM_KEY_LOCK = FNKBM_KEY_PANEL = 0;
+}
+
 void loadTweakSettings() {
+  loadNativeMouseSettings();
   NSDictionary *savedSettings = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kSettingsKey];
   if (savedSettings) {
     float v;
@@ -130,6 +153,9 @@ void loadTweakSettings() {
         GCMOUSE_DIRECT_KEY = (GCKeyCode)[directKeyVal intValue];
     }
   }
+  // Native mouse is always on in this mode, so its old toggle key is released
+  // for the game to use.
+  if (NATIVE_ALWAYS_ON) GCMOUSE_DIRECT_KEY = 0;
 }
 
 void loadKeyRemappings() {
@@ -139,7 +165,7 @@ void loadKeyRemappings() {
   memset(mouseButtonRemapArray, 0, sizeof(mouseButtonRemapArray));
   memset(mouseScrollRemapArray, 0, sizeof(mouseScrollRemapArray));
   memset(mouseScrollFortniteArray, 0, sizeof(mouseScrollFortniteArray));
-  NSDictionary *saved = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kKeyRemapKey];
+  NSDictionary *saved = nil;  // binds saved by an older build are ignored: the game's own bind page is used
   [keyRemappings removeAllObjects];
   if (saved) {
     for (NSString *keyString in saved) {
@@ -188,20 +214,46 @@ void loadFortniteKeybinds() {
   memset(fortniteBlockedDefaults, 0, sizeof(fortniteBlockedDefaults));
   memset(fortniteReverseMap, 0, sizeof(fortniteReverseMap));
   memset(mouseFortniteArray, 0, sizeof(mouseFortniteArray));
-  NSDictionary *fortniteBindings = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"fortniteKeybinds"];
+  NSDictionary *fortniteBindings = nil;  // ignored: the game's own bind page is used
   if (!fortniteBindings) return;
   static NSDictionary *actionDefaults = nil;
   if (!actionDefaults) {
     actionDefaults = @{
-      @"Forward" : @(26), @"Left" : @(4), @"Backward" : @(22), @"Right" : @(7),
-      @"Sprint" : @(225), @"Crouch" : @(224), @"Auto Walk" : @(46),
-      @"Harvesting Tool" : @(9), @"Use" : @(8), @"Reload" : @(21),
-      @"Weapon Slot 1" : @(30), @"Weapon Slot 2" : @(31), @"Weapon Slot 3" : @(32),
-      @"Weapon Slot 4" : @(33), @"Weapon Slot 5" : @(34), @"Build" : @(20),
-      @"Edit" : @(10), @"Wall" : @(29), @"Floor" : @(27), @"Stairs" : @(6),
-      @"Roof" : @(25), @"Inventory Toggle" : @(230), @"Emote" : @(5),
-      @"Chat" : @(40), @"Push To Talk" : @(23), @"Shake Head" : @(11), 
-      @"Map" : @(16), @"Escape" : @(41)
+      @"Forward" : @(26),
+      @"Left" : @(4),
+      @"Backward" : @(22),
+      @"Right" : @(7),
+      @"Jump" : @(44),
+      @"Sprint" : @(225),
+      @"Crouch" : @(224),
+      @"Auto Walk" : @(46),
+      @"Harvesting Tool" : @(9),
+      @"Use" : @(8),
+      @"Reload" : @(21),
+      @"Fire" : @(10050),
+      @"Aim" : @(10051),
+      @"Select Building Edit" : @(10050),
+      @"Reset Building Edit" : @(10051),
+      @"Weapon Slot 1" : @(30),
+      @"Weapon Slot 2" : @(31),
+      @"Weapon Slot 3" : @(32),
+      @"Weapon Slot 4" : @(33),
+      @"Weapon Slot 5" : @(34),
+      @"Build" : @(20),
+      @"Edit" : @(10),
+      @"Wall" : @(29),
+      @"Floor" : @(27),
+      @"Stairs" : @(6),
+      @"Roof" : @(25),
+      @"Trap" : @(23),
+      @"Repair / Upgrade" : @(11),
+      @"Inventory" : @(43),
+      @"Inventory Toggle" : @(226),
+      @"Emote" : @(5),
+      @"Chat" : @(40),
+      @"Push To Talk" : @(28),
+      @"Map" : @(16),
+      @"Escape" : @(41)
     };
   }
   for (NSString *action in fortniteBindings) {
@@ -213,11 +265,12 @@ void loadFortniteKeybinds() {
       if (custom != def && custom < 10200 && def < 10200) {
         fortniteRemapArray[custom] = def;
         fortniteReverseMap[def] = custom;
-        fortniteBlockedDefaults[def] = 1;
+        // A real mouse button keeps working when its action also gets a key.
+        if (def < 10000) fortniteBlockedDefaults[def] = 1;
       }
     }
   }
-  NSDictionary *mouseBindings = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"mouseFortniteBindings"];
+  NSDictionary *mouseBindings = nil;
   if (mouseBindings) {
     for (NSString *codeString in mouseBindings) {
       int mouseCode = [codeString intValue];
@@ -231,9 +284,11 @@ void loadFortniteKeybinds() {
 }
 
 void loadControllerMappings(void) {
-    NSInteger mode = [tweakDefaults() integerForKey:kVirtualControllerModeKey];
-    g_virtualControllerMode = (mode >= FnVirtualControllerAuto && mode <= FnVirtualControllerOff)
-        ? (FnVirtualControllerMode)mode : FnVirtualControllerAuto;
+    // KBM build: virtual controller is always off. Controller emulation
+    // conflicts with native keyboard/mouse input, so the saved preference
+    // is ignored and the tab to toggle it no longer exists.
+    g_virtualControllerMode = FnVirtualControllerOff;
+    isControllerModeEnabled = NO;
     memset(controllerMappingArray, 0, sizeof(controllerMappingArray));
     
     // Initialize with defaults
@@ -297,7 +352,7 @@ void recookVCtrlRemappings(void) {
             int d = [dst intValue];
             if (s < 10240 && d < 32) {
                 g_vctrlCustomMap[s] |= (1 << d);
-                g_vctrlSuppressionMap[s] = 1; // Mark as suppressed
+                if (isControllerModeEnabled) g_vctrlSuppressionMap[s] = 1; // Mark as suppressed
             }
             
             NSMutableSet *set = cooked[src];

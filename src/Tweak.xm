@@ -20,6 +20,160 @@
 #import <mach/mach.h>
 #import <mach/thread_policy.h>
 #import <pthread.h>
+#import <os/log.h>
+#import <notify.h>
+#import <sys/stat.h>
+#import <errno.h>
+#import "./fnkbm_logscan.h"
+
+// FnKbm diagnostics: public log lines readable with `log show`/`log stream`.
+#define KLOG(fmt, ...) os_log(OS_LOG_DEFAULT, "[FnKbm] " fmt, ##__VA_ARGS__)
+
+#ifdef FNKBM_DEBUG
+// Test hooks: the wrapped handlers the game registered, so input can be
+// injected from outside (darwin notification "fnkbm.dbg") for testing.
+static GCKeyboardValueChangedHandler g_dbgKbWrapper = nil;
+static GCMouseMoved g_dbgMouseWrapper = nil;
+static GCControllerButtonValueChangedHandler g_dbgBtnPressed[3] = {nil, nil, nil};
+static GCControllerButtonValueChangedHandler g_dbgBtnValue[3] = {nil, nil, nil};
+static __unsafe_unretained GCControllerButtonInput *g_dbgBtn[3] = {nil, nil, nil};
+#endif
+static int fnkbmMouseButtonIndex(GCControllerButtonInput *btn);
+static void _sendDualKeyEvent(GCKeyCode kc, BOOL pressed);
+#import <mach-o/dyld.h>
+
+// ── Bound keys, translated in place ─────────────────────────────────────
+// A bound key is not swallowed and re-sent. The game's own key event goes
+// through untouched and only the key code it reads is changed. That adds no
+// delay, and a release can never be lost because it is the same event pair.
+static BOOL g_fnkbmKeysInProcess = NO;      // the game's key methods are hooked
+static BOOL g_fnkbmModsInProcess = NO;      // modifier keys were seen arriving the same way
+static uint16_t g_fnkbmXlat[512] = {0};     // held key -> key the game sees (0 = itself)
+static BOOL g_fnkbmDropped[512] = {NO};     // held key hidden from the game
+static BOOL g_fnkbmSynthHeld[512] = {NO};   // key injected by the tweak, never translated
+static uint16_t g_fnkbmKeyAsButton[512] = {0}; // held key that is pressing a mouse button
+#define FNKBM_CMD_MASK 0x00100000ULL
+static _Atomic bool g_fnkbmRealActive = true;   // the app really is in front (not what the game is told)
+static BOOL g_fnkbmMenuScroll = NO;             // a wheel step is being passed to the game while the cursor is free
+
+// The handlers the game registered for the real mouse buttons. A bind that
+// targets a mouse button (reset edit on a key, for example) presses the
+// button through these, so the game sees a genuine mouse button.
+static GCControllerButtonValueChangedHandler g_fnkbmGameBtnHandler[3] = {nil, nil, nil};
+static __unsafe_unretained GCControllerButtonInput *g_fnkbmGameBtn[3] = {nil, nil, nil};
+static BOOL g_fnkbmGameBtnDown[3] = {NO, NO, NO};
+static BOOL fnkbmGameMouseButton(int code, BOOL pressed) {
+    int i = code == MOUSE_BUTTON_LEFT ? 0 : code == MOUSE_BUTTON_RIGHT ? 1 : code == MOUSE_BUTTON_MIDDLE ? 2 : -1;
+    if (i < 0 || !g_fnkbmGameBtnHandler[i]) return NO;
+    if (pressed == g_fnkbmGameBtnDown[i]) return YES;
+    g_fnkbmGameBtnDown[i] = pressed;
+    if (i == 1) rightButtonIsPressed = pressed;
+    KLOG("bind pressed game mouse button %d: %d", i, pressed);
+    g_fnkbmGameBtnHandler[i](g_fnkbmGameBtn[i], pressed ? 1.0f : 0.0f, pressed);
+    return YES;
+}
+
+static BOOL fnkbmRemapActive(void) {
+    return isMouseLocked && !isTypingModeEnabled && !isPopupVisible && keyCaptureCallback == nil;
+}
+// What a key is bound to: 0 nothing, -1 hidden from the game, else the key the game should see.
+static long fnkbmKeyTarget(long code) {
+    if (code <= 0 || code >= 512) return 0;
+    GCKeyCode c = keyRemapArray[code];
+    if (c == (GCKeyCode)-1) return -1;
+    if (c != 0) return (long)c;
+    GCKeyCode f = fortniteRemapArray[code];
+    if (f != 0) return (long)f;
+    if (fortniteBlockedDefaults[code] != 0) return -1;
+    return 0;
+}
+// A key with no separate release (Caps Lock): press the bound key briefly.
+static void fnkbmTapKey(GCKeyCode target) {
+    KLOG("tap key %ld", (long)target);
+    _sendDualKeyEvent(target, YES);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        _sendDualKeyEvent(target, NO);
+    });
+}
+
+// The bind dialog waits for a key or a mouse button. Mouse buttons are taken
+// from GameController here, which sees every press. Left click is left alone
+// because it operates the dialog.
+static BOOL fnkbmCaptureMouseButton(int code) {
+    if (!isPopupVisible || code == MOUSE_BUTTON_LEFT) return NO;
+    void (^mb)(int) = mouseButtonCaptureCallback;
+    void (^kc)(GCKeyCode) = keyCaptureCallback;
+    if (!mb && !kc) return NO;
+    mouseButtonCaptureCallback = nil;
+    keyCaptureCallback = nil;
+    KLOG("bind capture: mouse button code=%d", code);
+    if (mb) mb(code); else kc((GCKeyCode)code);
+    return YES;
+}
+
+// Key a mouse button is bound to (0 if none). Same order the tweak uses elsewhere.
+static GCKeyCode fnkbmMouseRemapTarget(int code) {
+    GCKeyCode t = 0;
+    if (code >= 0 && code < 10200) t = fortniteRemapArray[code];
+    int idx = code - MOUSE_BUTTON_MIDDLE;
+    if (t == 0 && idx >= 0 && idx < MOUSE_REMAP_COUNT) {
+        t = mouseButtonRemapArray[idx];
+        if (t == 0) t = mouseFortniteArray[idx];
+    }
+    // Remaps from a config file are stored folded into the key table.
+    if (t == 0 && code >= 10000 && code < 10200) t = keyRemapArray[code % 512];
+    return (t == (GCKeyCode)-1) ? 0 : t;
+}
+
+// Native mode handling of one mouse button event from GameController.
+// Returns YES when the event should go on to the game's own handler.
+// - cursor free (menus): presses are dropped, the click is a screen touch.
+// - bound button: the bound key is pressed/released instead.
+// - otherwise: the game gets the real mouse button.
+// A release always follows whatever its press did, so nothing sticks.
+#define FNKBM_BTN_SLOTS 64
+static BOOL g_fnkbmFwdPressed[FNKBM_BTN_SLOTS] = {NO};
+static BOOL g_fnkbmFwdValue[FNKBM_BTN_SLOTS] = {NO};
+static GCKeyCode g_fnkbmKeyDown[FNKBM_BTN_SLOTS] = {0};
+static BOOL fnkbmNativeButton(int code, BOOL pressed, BOOL *fwd, BOOL sendKeys) {
+    int slot = code - MOUSE_BUTTON_MIDDLE;
+    if (slot < 0 || slot >= FNKBM_BTN_SLOTS) return YES;
+    BOOL native = isMouseLocked && isGCMouseDirectActive && !isPopupVisible;
+    // Cursor free, tweak panel closed: the left button stays a screen touch, but
+    // the other buttons go to the game, so its own "press a key" prompt can see
+    // a right click, a wheel click, or the key a side button is bound to.
+    BOOL menu = !native && !isPopupVisible && NATIVE_ALWAYS_ON && !isControllerModeEnabled && code != MOUSE_BUTTON_LEFT;
+    if (pressed) {
+        if (!native && !menu) return NO;
+        GCKeyCode target = fnkbmMouseRemapTarget(code);
+        // The game registers its own handlers for the first two extra mouse
+        // buttons (it binds them as thumb buttons). They always go to the game;
+        // a bind for them saved in the tweak panel is ignored.
+        if (code == MOUSE_BUTTON_AUX_BASE || code == MOUSE_BUTTON_AUX_BASE + 1) target = 0;
+        if (target != 0) {
+            if (sendKeys && g_fnkbmKeyDown[slot] == 0) {
+                g_fnkbmKeyDown[slot] = target;
+                KLOG("mouse button code=%d bound to key %ld: key down", code, (long)target);
+                _sendDualKeyEvent(target, YES);
+            }
+            return NO;
+        }
+        fwd[slot] = YES;
+        if (code == MOUSE_BUTTON_RIGHT) rightButtonIsPressed = YES;   // aiming multiplier
+        return YES;
+    }
+    if (sendKeys && g_fnkbmKeyDown[slot] != 0) {
+        GCKeyCode target = g_fnkbmKeyDown[slot];
+        g_fnkbmKeyDown[slot] = 0;
+        KLOG("mouse button code=%d bound to key %ld: key up", code, (long)target);
+        _sendDualKeyEvent(target, NO);
+        return NO;
+    }
+    if (!fwd[slot]) return NO;
+    fwd[slot] = NO;
+    if (code == MOUSE_BUTTON_RIGHT) rightButtonIsPressed = NO;
+    return YES;
+}
 
 static BOOL isSystemCaller(void *retAddr) {
     Dl_info info;
@@ -280,7 +434,16 @@ static id g_backgroundActivityToken = nil;
 
 static void updateGCMouseDirectState(int code, BOOL pressed) {
     if (code != 0 && (GCKeyCode)code == GCMOUSE_DIRECT_KEY) {
-        isGCMouseDirectActive = pressed;
+        // Toggle on key-down only. The same physical press can reach this
+        // function from more than one input path (GameController, NSEvent,
+        // CGEvent) and from key auto-repeat, so a held flag makes one press
+        // count once; key-up only clears the flag.
+        static BOOL directKeyHeld = NO;
+        if (!pressed) { directKeyHeld = NO; return; }
+        if (directKeyHeld) return;
+        directKeyHeld = YES;
+        isGCMouseDirectActive = !isGCMouseDirectActive;
+        KLOG("direct key toggled: direct=%d", isGCMouseDirectActive);
         // If we just deactivated, clear accumulators and virtual sticks
         if (!isGCMouseDirectActive) {
             atomic_store(&mouseAccumBufferX[0], 0);
@@ -988,6 +1151,12 @@ static void _sendDualKeyEvent(GCKeyCode kc, BOOL pressed) {
 
     // 1. Mouse Button Support (Synthesize click if target is a mouse button)
     if ((int)kc >= 10000) {
+       static BOOL viaGame[3] = {NO, NO, NO};
+       int bi = (int)kc == MOUSE_BUTTON_LEFT ? 0 : (int)kc == MOUSE_BUTTON_RIGHT ? 1 : (int)kc == MOUSE_BUTTON_MIDDLE ? 2 : -1;
+       if (bi >= 0) {
+           if (pressed && isMouseLocked && isGCMouseDirectActive && fnkbmGameMouseButton((int)kc, YES)) { viaGame[bi] = YES; return; }
+           if (!pressed && viaGame[bi]) { viaGame[bi] = NO; fnkbmGameMouseButton((int)kc, NO); return; }
+       }
        _sendMouseButtonEvent((int)kc, pressed);
        return;
     }
@@ -1196,6 +1365,7 @@ static bool hooked_availability_version_check(uint32_t count,
 #import <fcntl.h>
 #import <unistd.h>
 #import <sys/stat.h>
+#import <errno.h>
 
 static int (*orig_open)(const char *path, int oflag, ...) = NULL;
 static int (*orig_close)(int fd) = NULL;
@@ -1330,6 +1500,12 @@ static int hooked_open(const char *path, int oflag, ...) {
         fd = open(path, oflag, mode);
     }
     
+    if (path) {
+        size_t plen = strlen(path);
+        if (plen > 4 && strcmp(path + plen - 4, ".ini") == 0) {
+            KLOG("open ini fd=%d flags=%#x %{public}s", fd, oflag, path);
+        }
+    }
     if (fd >= 0 && path && strstr(path, "GameUserSettings.ini") != NULL) {
         if ((oflag & O_WRONLY) || (oflag & O_RDWR)) {
             pthread_mutex_lock(&g_monitoredMutex);
@@ -1732,9 +1908,10 @@ static void handleHIDInputReport(void *context, int32_t result, void *sender, ui
     
     // Keep coordinates in their native aim direction (do not manually invert)
     
-    // Efficiency: Avoid flooding if zero movement
-    // Efficiency: Avoid flooding if zero movement
-    if (dx_raw != 0 || dy_raw != 0) {
+    // Native mouse mode: the game gets movement from its own mouse handler.
+    // Feeding the gyro orientation as well would aim twice and tell the game
+    // a motion device is in use, so this path stays idle.
+    if ((dx_raw != 0 || dy_raw != 0) && !isGCMouseDirectActive) {
         // 1. Accumulate into the pull-buffer for visual smoothness (legacy fallback)
         int idx = atomic_load(&activeBufferIdx);
         atomic_fetch_add(&mouseAccumBufferX[idx], (double)dx_raw);
@@ -1767,10 +1944,179 @@ static void handleHIDInputReport(void *context, int32_t result, void *sender, ui
     // LEVEL 20: Unified Input Singularity
     // Re-assert virtual controller sticks and buttons on the hardware clock (1000Hz).
     // This removes the 1-2ms "jitter" caused by thread context switching in Level 19.
-    if (isMouseLocked && !isPopupVisible) {
+    if (isMouseLocked && !isPopupVisible && isControllerModeEnabled) {
         _updateVStick(NO, YES); // Left Stick (Sync)
         _updateVStick(YES, YES); // Right Stick (Sync)
     }
+}
+
+// ── Mouse movement smoothing ─────────────────────────────────────────────
+// See fnkbm_smooth.h. In native mode all movement for the game goes through
+// fnkbmMouseFeed, from whichever thread it arrives on.
+#include "fnkbm_smooth.h"
+#include <os/lock.h>
+static FnkbmSmooth g_fnkbmSmooth = {0, 0, 0, 0, 8.0, 0, 0};
+static os_unfair_lock g_fnkbmSmoothLock = OS_UNFAIR_LOCK_INIT;
+static BOOL g_fnkbmMouseSmooth = YES;
+static double g_fnkbmEmitCarryX = 0, g_fnkbmEmitCarryY = 0;   // lock held
+static dispatch_source_t g_fnkbmSmoothTimer = nil;
+static _Atomic long g_fnkbmFeedDirect = 0, g_fnkbmFeedHeld = 0;
+
+static double fnkbmNowMs(void) {
+    static mach_timebase_info_data_t tb;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ mach_timebase_info(&tb); });
+    return (double)mach_absolute_time() * tb.numer / tb.denom / 1e6;
+}
+// Passes movement to the game in whole counts and carries the fraction. Lock held.
+static void fnkbmMouseEmit(double x, double y) {
+    FnGCMouseMovedHandler h = g_originalMouseHandler;
+    if (!h) return;
+    g_fnkbmEmitCarryX += x; g_fnkbmEmitCarryY += y;
+    double ox = round(g_fnkbmEmitCarryX), oy = round(g_fnkbmEmitCarryY);
+    g_fnkbmEmitCarryX -= ox; g_fnkbmEmitCarryY -= oy;
+    if (ox != 0 || oy != 0) h(g_capturedMouseInput, (float)ox, (float)oy);
+}
+// Movement for the game, already scaled by the sensitivity settings. Any thread.
+static void fnkbmMouseFeed(double dx, double dy) {
+    os_unfair_lock_lock(&g_fnkbmSmoothLock);
+    double ox = dx, oy = dy;
+    if (!g_fnkbmMouseSmooth || fnkbmSmoothAdd(&g_fnkbmSmooth, fnkbmNowMs(), dx, dy, &ox, &oy)) {
+        fnkbmMouseEmit(ox, oy);
+        atomic_fetch_add(&g_fnkbmFeedDirect, 1);
+    } else {
+        atomic_fetch_add(&g_fnkbmFeedHeld, 1);
+    }
+    os_unfair_lock_unlock(&g_fnkbmSmoothLock);
+}
+static void fnkbmInstallMouseSmooth(void) {
+    g_fnkbmMouseSmooth = YES;  // no panel to switch it: always on
+    dispatch_queue_t q = dispatch_queue_create("fnkbm.mousesmooth", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+    g_fnkbmSmoothTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, DISPATCH_TIMER_STRICT, q);
+    dispatch_source_set_timer(g_fnkbmSmoothTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_MSEC, 0);
+    dispatch_source_set_event_handler(g_fnkbmSmoothTimer, ^{
+        os_unfair_lock_lock(&g_fnkbmSmoothLock);
+        if (g_fnkbmSmooth.pendX != 0 || g_fnkbmSmooth.pendY != 0) {
+            if (!isGCMouseDirectActive) {
+                g_fnkbmSmooth.pendX = g_fnkbmSmooth.pendY = 0;
+            } else {
+                double x = 0, y = 0;
+                fnkbmSmoothTick(&g_fnkbmSmooth, fnkbmNowMs(), &x, &y);
+                fnkbmMouseEmit(x, y);
+            }
+        }
+        os_unfair_lock_unlock(&g_fnkbmSmoothLock);
+    });
+    dispatch_resume(g_fnkbmSmoothTimer);
+    KLOG("mouse smoothing=%d", g_fnkbmMouseSmooth);
+}
+
+// ── Mouse movement taken from the device ─────────────────────────────────
+// GameController passes mouse movement on in coarse steps, at most about a
+// hundred a second. At 120 frames a second that leaves frames with no
+// movement and frames with double, which looks like a low frame rate.
+// The device itself reports far more often. Its X and Y values are read
+// here, on their own thread, and added to the game's mouse total directly.
+// Before a device is trusted, its values are compared with what
+// GameController reports for the same movement: they must agree closely,
+// and the comparison also gives the scale and direction to use. A device
+// that does not agree, or that reports no more often than GameController
+// passes on, is left on the GameController path.
+#define FNKBM_HID_DEVS 6
+typedef struct {
+    void *dev;
+    _Atomic long pendX, pendY, pendN;      // device counts since the last GameController event
+    double sxx, hxx, gxx, syy, hyy, gyy;   // comparison sums (main thread)
+    long samples, values;
+    _Atomic int state;                     // 0 comparing, 1 in use, 2 not usable
+    double kx, ky;                         // GameController units per device count, signed
+} FnkbmHidDev;
+static FnkbmHidDev g_fnkbmHid[FNKBM_HID_DEVS];
+static _Atomic int g_fnkbmHidCount = 0;
+static _Atomic long g_fnkbmGcEvents = 0, g_fnkbmHidValues = 0, g_fnkbmHidForwarded = 0;
+static _Atomic long g_fnkbmHidLastFwdMs = 0;   // when a trusted device last delivered movement
+
+typedef void *(*FnkbmValueGetElement_t)(void *);
+typedef uint32_t (*FnkbmElementGetU32_t)(void *);
+typedef long (*FnkbmValueGetInteger_t)(void *);
+static FnkbmValueGetElement_t fnkbm_ValueGetElement = NULL;
+static FnkbmElementGetU32_t fnkbm_ElementGetUsagePage = NULL, fnkbm_ElementGetUsage = NULL;
+static FnkbmValueGetInteger_t fnkbm_ValueGetInteger = NULL;
+
+static FnkbmHidDev *fnkbmHidDevice(void *sender) {   // device thread
+    int n = atomic_load(&g_fnkbmHidCount);
+    for (int i = 0; i < n; i++) if (g_fnkbmHid[i].dev == sender) return &g_fnkbmHid[i];
+    if (n >= FNKBM_HID_DEVS) return NULL;
+    memset(&g_fnkbmHid[n], 0, sizeof(FnkbmHidDev));
+    g_fnkbmHid[n].dev = sender;
+    atomic_store(&g_fnkbmHidCount, n + 1);
+    return &g_fnkbmHid[n];
+}
+
+static void fnkbmHidValue(void *context, int result, void *sender, void *value) {
+    if (!value || !fnkbm_ValueGetElement) return;
+    void *el = fnkbm_ValueGetElement(value);
+    if (!el) return;
+    uint32_t page = fnkbm_ElementGetUsagePage(el), usage = fnkbm_ElementGetUsage(el);
+    if (page != 0x01 || (usage != 0x30 && usage != 0x31)) return;   // generic desktop X / Y
+    long v = fnkbm_ValueGetInteger(value);
+    if (v == 0) return;
+    atomic_fetch_add(&g_fnkbmHidValues, 1);
+    if (!isMouseLocked || !isGCMouseDirectActive || isPopupVisible || !atomic_load(&g_fnkbmRealActive)) return;
+    FnkbmHidDev *d = fnkbmHidDevice(sender);
+    if (!d) return;
+    int st = atomic_load(&d->state);
+    if (st == 0) {
+        if (usage == 0x30) atomic_fetch_add(&d->pendX, v); else atomic_fetch_add(&d->pendY, v);
+        atomic_fetch_add(&d->pendN, 1);
+        return;
+    }
+    if (st != 1) return;
+    double ads = rightButtonIsPressed ? (NATIVE_ADS_SENS / 100.0) : 1.0;
+    if (usage == 0x30) fnkbmMouseFeed((double)v * d->kx * (NATIVE_SENS_X / 100.0) * ads, 0);
+    else fnkbmMouseFeed(0, (double)v * d->ky * (NATIVE_SENS_Y / 100.0) * ads);
+    atomic_store(&g_fnkbmHidLastFwdMs, (long)fnkbmNowMs());
+    atomic_fetch_add(&g_fnkbmHidForwarded, 1);
+}
+
+// Called for each GameController movement event while native mode is on.
+// Returns YES when a trusted device already delivered this movement.
+static BOOL fnkbmHidOnGCEvent(float gx, float gy) {
+    atomic_fetch_add(&g_fnkbmGcEvents, 1);
+    // A trusted device delivered within the last 100 ms: this event repeats
+    // its movement. Judged by time, because the two paths are not in step.
+    BOOL fed = (long)fnkbmNowMs() - atomic_load(&g_fnkbmHidLastFwdMs) < 100;
+    FnkbmHidDev *learner = NULL; long lx = 0, ly = 0, ln = 0; int movers = 0;
+    int n = atomic_load(&g_fnkbmHidCount);
+    for (int i = 0; i < n; i++) {
+        FnkbmHidDev *d = &g_fnkbmHid[i];
+        if (atomic_load(&d->state) != 0) continue;
+        long pn = atomic_exchange(&d->pendN, 0), px = atomic_exchange(&d->pendX, 0), py = atomic_exchange(&d->pendY, 0);
+        if (pn > 0) { movers++; learner = d; lx = px; ly = py; ln = pn; }
+    }
+    if (movers == 1 && !fed) {
+        FnkbmHidDev *d = learner;
+        d->sxx += (double)lx * gx; d->hxx += (double)lx * lx; d->gxx += (double)gx * gx;
+        d->syy += (double)ly * gy; d->hyy += (double)ly * ly; d->gyy += (double)gy * gy;
+        d->samples++; d->values += ln;
+        if (d->samples >= 200 && d->hxx > 5000 && d->hyy > 5000 && d->gxx > 5000 && d->gyy > 5000) {
+            double cx = d->sxx / sqrt(d->hxx * d->gxx), cy = d->syy / sqrt(d->hyy * d->gyy);
+            double per = (double)d->values / (double)d->samples;   // one report gives up to two values
+            BOOL agrees = fabs(cx) > 0.9 && fabs(cy) > 0.9;
+            if (agrees && per > 2.5) {
+                d->kx = d->sxx / d->hxx; d->ky = d->syy / d->hyy;
+                atomic_store(&d->state, 1);
+                KLOG("mouse device %p trusted: agreement x=%.3f y=%.3f, scale x=%.3f y=%.3f, %.1f values per GameController event, after %ld samples", d->dev, cx, cy, d->kx, d->ky, per, d->samples);
+            } else if (agrees) {
+                atomic_store(&d->state, 2);
+                KLOG("mouse device %p agrees (x=%.3f y=%.3f) but reports no more often than GameController passes on (%.1f values per event): staying on GameController", d->dev, cx, cy, per);
+            } else if (d->samples >= 1500) {
+                atomic_store(&d->state, 2);
+                KLOG("mouse device %p not usable: agreement x=%.3f y=%.3f after %ld samples, staying on GameController", d->dev, cx, cy, d->samples);
+            }
+        }
+    }
+    return fed;
 }
 
 static void setupHIDManager() {
@@ -1792,6 +2138,16 @@ static void setupHIDManager() {
     
     fn_IOHIDManagerSetDeviceMatching((IOHIDManagerRef)g_hidManager, (__bridge CFDictionaryRef)matching);
     fn_IOHIDManagerRegisterInputReportCallback((IOHIDManagerRef)g_hidManager, handleHIDInputReport, NULL);
+    // Per-axis values, decoded by the system from the device's own description.
+    typedef void (*FnkbmRegisterValue_t)(void *, void (*)(void *, int, void *, void *), void *);
+    FnkbmRegisterValue_t regValue = (FnkbmRegisterValue_t)dlsym(RTLD_DEFAULT, "IOHIDManagerRegisterInputValueCallback");
+    fnkbm_ValueGetElement = (FnkbmValueGetElement_t)dlsym(RTLD_DEFAULT, "IOHIDValueGetElement");
+    fnkbm_ElementGetUsagePage = (FnkbmElementGetU32_t)dlsym(RTLD_DEFAULT, "IOHIDElementGetUsagePage");
+    fnkbm_ElementGetUsage = (FnkbmElementGetU32_t)dlsym(RTLD_DEFAULT, "IOHIDElementGetUsage");
+    fnkbm_ValueGetInteger = (FnkbmValueGetInteger_t)dlsym(RTLD_DEFAULT, "IOHIDValueGetIntegerValue");
+    BOOL valueOk = regValue && fnkbm_ValueGetElement && fnkbm_ElementGetUsagePage && fnkbm_ElementGetUsage && fnkbm_ValueGetInteger;
+    if (valueOk) regValue(g_hidManager, fnkbmHidValue, NULL); else fnkbm_ValueGetElement = NULL;
+    KLOG("mouse device reader: %d", valueOk);
     
     // Level 14: Dedicated HID Thread with Mach Real-Time priority
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
@@ -1800,6 +2156,830 @@ static void setupHIDManager() {
         fn_IOHIDManagerOpen((IOHIDManagerRef)g_hidManager, 0);
         CFRunLoopRun();
     });
+}
+
+// 0 left, 1 right, 2 middle, -1 not a mouse button of the current mouse.
+static int fnkbmMouseButtonIndex(GCControllerButtonInput *btn) {
+    NSNumber *codeNum = objc_getAssociatedObject(btn, &kButtonCodeKey);
+    if (codeNum) {
+        int c = [codeNum intValue];
+        return c == MOUSE_BUTTON_LEFT ? 0 : c == MOUSE_BUTTON_RIGHT ? 1 : c == MOUSE_BUTTON_MIDDLE ? 2 : -1;
+    }
+    GCMouseInput *mi = GCMouse.current.mouseInput;
+    if (!mi) return -1;
+    if (btn == mi.leftButton) return 0;
+    if (btn == mi.rightButton) return 1;
+    if (btn == mi.middleButton) return 2;
+    return -1;
+}
+
+// Unreal input settings for a real mouse: clicks go to the game view, not to
+// a screen touch, and the view keeps the mouse captured. Written as the saved
+// Input.ini layer. An existing file that is not ours is left alone.
+static NSString *const kFnKbmIniMarker = @"; FnKbm native mouse input";
+static void fnkbmWriteInputIni(void) {
+    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/FortniteGame/Saved/Config/IOS"];
+    NSString *path = [dir stringByAppendingPathComponent:@"Input.ini"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL want = [[NSUserDefaults standardUserDefaults] objectForKey:@"fnkbm.inputIni"] ?
+        [[NSUserDefaults standardUserDefaults] boolForKey:@"fnkbm.inputIni"] : NO;
+    NSString *cur = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    BOOL ours = cur && [cur hasPrefix:kFnKbmIniMarker];
+    KLOG("input ini want=%d exists=%d ours=%d path=%{public}s", want, cur != nil, ours, path.UTF8String);
+    if (cur && !ours) { KLOG("input ini exists and is not ours, left alone: %{public}s", cur.UTF8String); return; }
+    if (!want) { if (ours) { [fm removeItemAtPath:path error:nil]; KLOG("input ini removed"); } return; }
+    NSString *body = [kFnKbmIniMarker stringByAppendingString:
+        @"\n[/Script/Engine.InputSettings]\n"
+        @"bUseMouseForTouch=False\n"
+        @"bCaptureMouseOnLaunch=True\n"
+        @"bEnableMouseSmoothing=False\n"
+        @"DefaultViewportMouseCaptureMode=CapturePermanently\n"
+        @"DefaultViewportMouseLockMode=LockOnCapture\n"];
+    NSError *err = nil;
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&err];
+    BOOL ok = [body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
+    KLOG("input ini written ok=%d err=%{public}s", ok, err ? err.localizedDescription.UTF8String : "none");
+}
+
+// Earlier test builds wrote config files that turned out to have no effect.
+// Remove the ones carrying our marker, and their folders if left empty.
+static void fnkbmCleanOldConfig(void) {
+    NSString *home = NSHomeDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *marker = @"; FnKbm user config, written by FnMacTweak";
+    NSMutableArray<NSString *> *files = [NSMutableArray arrayWithObject:
+        [home stringByAppendingPathComponent:@"Documents/FortniteGame/Saved/Config/IOS/Game.ini"]];
+    for (NSString *root in @[@"Documents", @"Library/Application Support", @"Library/Preferences", @"Library/Caches"]) {
+        NSString *dir = [[home stringByAppendingPathComponent:root] stringByAppendingPathComponent:@"Unreal Engine/Engine/Config"];
+        [files addObject:[dir stringByAppendingPathComponent:@"UserGame.ini"]];
+        [files addObject:[dir stringByAppendingPathComponent:@"SystemGame.ini"]];
+    }
+    for (NSString *f in files) {
+        NSString *cur = [NSString stringWithContentsOfFile:f encoding:NSUTF8StringEncoding error:nil];
+        if (cur && [cur hasPrefix:marker]) {
+            BOOL ok = [fm removeItemAtPath:f error:nil];
+            KLOG("removed old config ok=%d %{public}s", ok, f.UTF8String);
+            NSString *d = [f stringByDeletingLastPathComponent];
+            for (int i = 0; i < 3 && [d rangeOfString:@"Unreal Engine"].location != NSNotFound; i++) {
+                if (rmdir(d.fileSystemRepresentation) != 0) break;   // only removes empty folders
+                d = [d stringByDeletingLastPathComponent];
+            }
+        }
+    }
+}
+
+// ── Cursor lock that follows the game ────────────────────────────────────
+// The game logs when it shows the cursor (menus) and hides it (gameplay).
+// Following that log, the cursor locks for gameplay and frees for menus
+// without a key. L still works as a manual override.
+static void updateMouseLock(BOOL value, CGPoint warpPos);
+static void resetControllerState();
+static dispatch_source_t g_fnkbmLogTimer = nil;
+static BOOL g_fnkbmHaveGameCursor = NO;
+static BOOL g_fnkbmGameCursorShown = YES;
+
+static void fnkbmApplyGameCursor(const char *why) {
+    if (!NATIVE_ALWAYS_ON || !g_fnkbmHaveGameCursor) return;
+    BOOL wantLock = !g_fnkbmGameCursorShown;
+    BOOL active = [UIApplication sharedApplication].applicationState == UIApplicationStateActive;
+    KLOG("game cursor shown=%d wantLock=%d locked=%d active=%d popup=%d (%{public}s)", g_fnkbmGameCursorShown, wantLock, isMouseLocked, active, isPopupVisible, why);
+    if (wantLock == isMouseLocked || isPopupVisible) return;
+    if (wantLock && !active) return;   // applied when the app becomes active again
+    // The game often shows its cursor for a fraction of a second during play.
+    // Freeing the cursor for that drops held inputs, so wait and see if it lasts.
+    static int unlockGen = 0;
+    unlockGen++;
+    if (!wantLock && strcmp(why, "settled") != 0) {
+        int gen = unlockGen;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            if (gen == unlockGen && g_fnkbmGameCursorShown) fnkbmApplyGameCursor("settled");
+        });
+        return;
+    }
+    isMouseLocked = wantLock;
+    if (wantLock) {
+        updateMouseLock(YES, CGPointZero);
+    } else {
+        UIWindowScene *sc = (UIWindowScene *)[[UIApplication sharedApplication].connectedScenes anyObject];
+        CGRect sb = sc ? sc.screen.bounds : CGRectMake(0, 0, 1920, 1080);
+        updateMouseLock(NO, CGPointMake(sb.size.width / 2.0, sb.size.height / 2.0));
+        resetControllerState();
+    }
+}
+
+// Writes the active binds to the log, so a test shows what was saved.
+static void fnkbmLogBinds(const char *why) {
+    NSMutableString *out = [NSMutableString string];
+    for (int i = 0; i < 10200; i++) {
+        if (fortniteRemapArray[i]) [out appendFormat:@"%d>%ld ", i, (long)fortniteRemapArray[i]];
+        if (i < 512 && keyRemapArray[i]) [out appendFormat:@"%d=>%ld ", i, (long)keyRemapArray[i]];
+    }
+    for (int i = 0; i < MOUSE_REMAP_COUNT; i++) {
+        if (mouseButtonRemapArray[i]) [out appendFormat:@"m%d=>%ld ", MOUSE_BUTTON_MIDDLE + i, (long)mouseButtonRemapArray[i]];
+        if (mouseFortniteArray[i]) [out appendFormat:@"m%d>%ld ", MOUSE_BUTTON_MIDDLE + i, (long)mouseFortniteArray[i]];
+    }
+    KLOG("binds (%{public}s): %{public}s", why, out.length ? out.UTF8String : "none");
+}
+
+static void fnkbmStartLogFollower(void) {
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/FortniteGame/Saved/Logs/FortniteGame.log"];
+    char *cpath = strdup(path.fileSystemRepresentation);
+    time_t started = time(NULL);
+    dispatch_queue_t q = dispatch_queue_create("fnkbm.logfollow", DISPATCH_QUEUE_SERIAL);
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), 50 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+    __block int fd = -1;
+    __block ino_t ino = 0;
+    __block off_t pos = 0;
+    __block unsigned tick = 0;
+    NSMutableData *pending = [NSMutableData data];
+    dispatch_source_set_event_handler(timer, ^{
+        static BOOL panelWasOpen = NO;
+        BOOL panelOpen = isPopupVisible;
+        if (panelWasOpen && !panelOpen) {
+            dispatch_async(dispatch_get_main_queue(), ^{ fnkbmLogBinds("panel closed"); fnkbmApplyGameCursor("panel closed"); });
+        }
+        panelWasOpen = panelOpen;
+        struct stat st;
+        static int waitReason = 0;   // logged once per reason
+        // Once a second, or while no file is open: is this session's log there?
+        if (fd < 0 || (tick++ % 20) == 0) {
+            if (stat(cpath, &st) != 0) {
+                if (waitReason != 1) { waitReason = 1; KLOG("log follower waiting: stat failed errno=%d", errno); }
+                return;
+            }
+            // The game keeps one log file and rewrites it each launch, so the
+            // file is this session's once it has been written since we started.
+            if (fd < 0 && st.st_mtimespec.tv_sec < started - 2) {
+                if (waitReason != 2) { waitReason = 2; KLOG("log follower waiting: log not written this session yet (age=%lds)", (long)(time(NULL) - st.st_mtimespec.tv_sec)); }
+                return;
+            }
+            if (fd < 0 || st.st_ino != ino) {
+                if (fd >= 0) close(fd);
+                fd = open(cpath, O_RDONLY);
+                ino = st.st_ino; pos = 0; pending.length = 0;
+                KLOG("following game log fd=%d size=%lld", fd, (long long)st.st_size);
+                if (fd < 0) return;
+            }
+        }
+        if (fstat(fd, &st) != 0) return;
+        if (st.st_size < pos) { pos = 0; pending.length = 0; }
+        int last = -1;
+        char buf[16384];
+        while (pos < st.st_size) {
+            ssize_t n = pread(fd, buf, sizeof(buf), pos);
+            if (n <= 0) break;
+            pos += n;
+            [pending appendBytes:buf length:(NSUInteger)n];
+            size_t done = fnkbmCompleteLinesLength((const char *)pending.bytes, pending.length);
+            if (done > 0) {
+                int s2 = fnkbmScanCursorState((const char *)pending.bytes, done);
+                if (s2 != -1) last = s2;
+                [pending replaceBytesInRange:NSMakeRange(0, done) withBytes:NULL length:0];
+            }
+            if (pending.length > 65536) pending.length = 0;   // one absurdly long line: drop it
+        }
+        if (last != -1) {
+            BOOL shown = (last == 1);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                g_fnkbmHaveGameCursor = YES;
+                g_fnkbmGameCursorShown = shown;
+                fnkbmApplyGameCursor("game log");
+            });
+        }
+    });
+    dispatch_resume(timer);
+    g_fnkbmLogTimer = timer;   // keeps the timer alive
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+        queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) { fnkbmApplyGameCursor("app active"); }];
+    KLOG("log follower started for %{public}s", cpath);
+}
+
+#ifdef FNKBM_DEBUG
+// Command word: op<<56 | a<<32 (16 bit) | b<<16 (signed 16) | c (signed 16)
+static void fnkbmDebugCommand(uint64_t w) {
+    int op = (int)(w >> 56), a = (int)((w >> 32) & 0xFFFF);
+    int b = (int16_t)((w >> 16) & 0xFFFF), c = (int16_t)(w & 0xFFFF);
+    KLOG("dbg op=%d a=%d b=%d c=%d", op, a, b, c);
+    switch (op) {
+        case 1: { // key a, pressed c, through the tweak's keyboard wrapper
+            if (!g_dbgKbWrapper || !storedKeyboardInput) { KLOG("dbg: no keyboard handler yet"); break; }
+            GCControllerButtonInput *btn = [storedKeyboardInput buttonForKeyCode:(GCKeyCode)a];
+            g_dbgKbWrapper(storedKeyboardInput, btn, (GCKeyCode)a, c != 0);
+            break; }
+        case 2: // mouse move b,c through the tweak's mouse wrapper
+            if (!g_dbgMouseWrapper) { KLOG("dbg: no mouse handler yet"); break; }
+            g_dbgMouseWrapper(g_capturedMouseInput, (float)b, (float)c);
+            break;
+        case 3: { // mouse button a (0 left 1 right 2 middle), pressed c
+            if (a < 0 || a > 2) break;
+            if (a == 1) rightButtonIsPressed = (c != 0);
+            if (a == 0) leftButtonIsPressed = (c != 0);
+            if (g_dbgBtnPressed[a]) g_dbgBtnPressed[a](g_dbgBtn[a], c ? 1.0f : 0.0f, c != 0);
+            if (g_dbgBtnValue[a]) g_dbgBtnValue[a](g_dbgBtn[a], c ? 1.0f : 0.0f, c != 0);
+            if (!g_dbgBtnPressed[a] && !g_dbgBtnValue[a]) KLOG("dbg: game registered no handler for button %d", a);
+            break; }
+        case 4: { // lock c
+            isMouseLocked = (c != 0);
+            UIWindowScene *sc = (UIWindowScene *)[[UIApplication sharedApplication].connectedScenes anyObject];
+            CGRect sb = sc ? sc.screen.bounds : CGRectMake(0, 0, 1920, 1080);
+            updateMouseLock(isMouseLocked, isMouseLocked ? CGPointZero : CGPointMake(sb.size.width / 2.0, sb.size.height / 2.0));
+            break; }
+        case 5: // state
+            KLOG("state lock=%d direct=%d ctrl=%d always=%d popup=%d kb=%d mouse=%d btnP=%d%d%d btnV=%d%d%d hid=%d vc=%d",
+                 isMouseLocked, isGCMouseDirectActive, isControllerModeEnabled, NATIVE_ALWAYS_ON, isPopupVisible,
+                 g_dbgKbWrapper != nil, g_dbgMouseWrapper != nil,
+                 g_dbgBtnPressed[0] != nil, g_dbgBtnPressed[1] != nil, g_dbgBtnPressed[2] != nil,
+                 g_dbgBtnValue[0] != nil, g_dbgBtnValue[1] != nil, g_dbgBtnValue[2] != nil,
+                 g_hidManager != NULL, g_virtualController != nil);
+            break;
+        case 6: // persist a boolean test switch: a=1 input ini
+            if (a == 1) { [[NSUserDefaults standardUserDefaults] setBool:(c != 0) forKey:@"fnkbm.inputIni"]; fnkbmWriteInputIni(); }
+            break;
+        case 7: // direct mode c
+            isGCMouseDirectActive = (c != 0);
+            KLOG("dbg direct=%d", isGCMouseDirectActive);
+            break;
+    }
+}
+static void fnkbmDebugInstall(void) {
+    static int token = 0;
+    uint32_t r = notify_register_dispatch("fnkbm.dbg", &token, dispatch_get_main_queue(), ^(int t) {
+        uint64_t w = 0; notify_get_state(t, &w); fnkbmDebugCommand(w);
+    });
+    KLOG("debug channel status=%u", r);
+}
+#endif
+
+static NSInteger (*g_origUIKeyKeyCode)(id, SEL) = NULL;
+static NSString *(*g_origUIKeyCharacters)(id, SEL) = NULL;
+static NSMutableDictionary<NSString *, NSValue *> *g_fnkbmPressOrig = nil;
+static int g_fnkbmPressDepth = 0;
+static BOOL g_fnkbmXlatRead = NO;   // the game read a translated key code
+
+static IMP fnkbmPressOrigFor(id obj, SEL sel) {
+    for (Class c = object_getClass(obj); c; c = class_getSuperclass(c)) {
+        NSValue *v = g_fnkbmPressOrig[[NSString stringWithFormat:@"%p/%s", (void *)c, sel_getName(sel)]];
+        if (v) return (IMP)v.pointerValue;
+    }
+    return NULL;
+}
+static long fnkbmPhysicalKey(UIPress *p) {
+    id k = [p respondsToSelector:@selector(key)] ? p.key : nil;
+    if (!k || !g_origUIKeyKeyCode) return 0;
+    long c = (long)g_origUIKeyKeyCode(k, @selector(keyCode));
+    return (c > 0 && c < 512) ? c : 0;
+}
+// Caps Lock: macOS reports it as a switch, on at one press and off at the
+// next, so the game would see it held down until pressed again. The game does
+// know the key. Each change is therefore given to the game as a short press:
+// down now, up 40 ms later. It cannot be held.
+static BOOL fnkbmCapsTap(id self, SEL _cmd, NSSet *presses, id event) {
+    if (isTypingModeEnabled || presses.count == 0) return NO;
+    for (UIPress *p in presses) if (fnkbmPhysicalKey(p) != 57) return NO;
+    BOOL change = sel_isEqual(_cmd, @selector(pressesBegan:withEvent:)) || sel_isEqual(_cmd, @selector(pressesEnded:withEvent:));
+    if (!change) return YES;                              // changed / cancelled: nothing to tell the game
+    IMP down = fnkbmPressOrigFor(self, @selector(pressesBegan:withEvent:)), up = fnkbmPressOrigFor(self, @selector(pressesEnded:withEvent:));
+    if (!down || !up) return NO;
+    KLOG("caps lock: sent to the game as a short press");
+    ((void (*)(id, SEL, NSSet *, id))down)(self, @selector(pressesBegan:withEvent:), presses, event);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        ((void (*)(id, SEL, NSSet *, id))up)(self, @selector(pressesEnded:withEvent:), presses, event);
+    });
+    return YES;
+}
+static void fnkbmHookedPresses(id self, SEL _cmd, NSSet *presses, id event) {
+    if (g_fnkbmPressDepth == 0 && fnkbmCapsTap(self, _cmd, presses, event)) return;
+    IMP orig = fnkbmPressOrigFor(self, _cmd);
+    BOOL began = sel_isEqual(_cmd, @selector(pressesBegan:withEvent:));
+    BOOL ended = sel_isEqual(_cmd, @selector(pressesEnded:withEvent:)) || sel_isEqual(_cmd, @selector(pressesCancelled:withEvent:));
+    NSMutableSet *pass = nil;
+    for (UIPress *p in presses) {
+        long code = fnkbmPhysicalKey(p);
+        if (!code) continue;
+        if (code >= 224 && code <= 231) g_fnkbmModsInProcess = YES;
+        if (began && g_fnkbmPressDepth == 0) {
+            long t = 0;
+            if (!g_fnkbmSynthHeld[code] && fnkbmRemapActive()) t = fnkbmKeyTarget(code);
+            // Command: the game takes the key but its bind screen does not accept it.
+            // With no bind of its own in the tweak, Left Command is shown to the game
+            // as Insert and Right Command as Home, keys a Mac keyboard does not have.
+            if (t == 0 && !g_fnkbmSynthHeld[code] && !isTypingModeEnabled) { if (code == 227) t = 73; else if (code == 231) t = 74; }
+            g_fnkbmDropped[code] = (t == -1);
+            g_fnkbmXlat[code] = (t > 0 && t < 512) ? (uint16_t)t : 0;
+            if (t >= 10000 && t < 10200) {
+                // Bound to a mouse button: hide the key and press the button.
+                g_fnkbmDropped[code] = YES;
+                g_fnkbmKeyAsButton[code] = (uint16_t)t;
+                _sendDualKeyEvent((GCKeyCode)t, YES);
+            }
+            if (t != 0) KLOG("key %ld -> %ld (in place)", code, t);
+        }
+        if (g_fnkbmDropped[code]) { if (!pass) pass = [presses mutableCopy]; [pass removeObject:p]; }
+    }
+    NSSet *deliver = pass ?: presses;
+    BOOL outermostBegan = began && g_fnkbmPressDepth == 0;
+    BOOL translated = NO;
+    if (outermostBegan) {
+        for (UIPress *p in presses) { long code = fnkbmPhysicalKey(p); if (code && g_fnkbmXlat[code]) translated = YES; }
+        g_fnkbmXlatRead = NO;
+    }
+    g_fnkbmPressDepth++;
+    if (orig && deliver.count > 0) ((void (*)(id, SEL, NSSet *, id))orig)(self, _cmd, deliver, event);
+    g_fnkbmPressDepth--;
+    // Safety net: if the game never reads the translated key code, this way of
+    // binding cannot work here, so go back to the old swallow-and-resend path.
+    if (outermostBegan && translated) {
+        static int unread = 0;
+        if (g_fnkbmXlatRead) unread = 0;
+        else if (++unread >= 3) {
+            g_fnkbmKeysInProcess = NO;
+            memset(g_fnkbmXlat, 0, sizeof(g_fnkbmXlat));
+            memset(g_fnkbmDropped, 0, sizeof(g_fnkbmDropped));
+            KLOG("key translation not read by the game: back to the resend path");
+        }
+    }
+    if (ended && g_fnkbmPressDepth == 0) {
+        for (UIPress *p in presses) {
+            long code = fnkbmPhysicalKey(p);
+            if (code && g_fnkbmKeyAsButton[code]) { _sendDualKeyEvent((GCKeyCode)g_fnkbmKeyAsButton[code], NO); g_fnkbmKeyAsButton[code] = 0; }
+            if (code) { g_fnkbmXlat[code] = 0; g_fnkbmDropped[code] = NO; }
+        }
+    }
+}
+static NSInteger fnkbmHookedKeyCode(id self, SEL _cmd) {
+    NSInteger c = g_origUIKeyKeyCode(self, _cmd);
+    if (c > 0 && c < 512) { uint16_t t = g_fnkbmXlat[c]; if (t) { g_fnkbmXlatRead = YES; return t; } }
+    return c;
+}
+static NSString *fnkbmHookedCharacters(id self, SEL _cmd) {
+    NSString *orig = g_origUIKeyCharacters(self, _cmd);
+    NSInteger c = g_origUIKeyKeyCode ? g_origUIKeyKeyCode(self, @selector(keyCode)) : 0;
+    if (c <= 0 || c >= 512 || !g_fnkbmXlat[c]) return orig;
+    long k = g_fnkbmXlat[c];
+    if (k >= 4 && k <= 29) return [NSString stringWithFormat:@"%c", (char)('a' + (k - 4))];
+    if (k >= 30 && k <= 38) return [NSString stringWithFormat:@"%c", (char)('1' + (k - 30))];
+    if (k == 39) return @"0";
+    if (k == 40) return @"\r";
+    if (k == 43) return @"\t";
+    if (k == 44) return @" ";
+    return @"";
+}
+static void fnkbmInstallKeyTranslation(void) {
+    Class keyClass = objc_getClass("UIKey");
+    Method mk = keyClass ? class_getInstanceMethod(keyClass, @selector(keyCode)) : NULL;
+    Method mc = keyClass ? class_getInstanceMethod(keyClass, @selector(characters)) : NULL;
+    if (!mk) { KLOG("key translation off: no UIKey keyCode"); return; }
+    g_fnkbmPressOrig = [NSMutableDictionary dictionary];
+    SEL sels[4] = { @selector(pressesBegan:withEvent:), @selector(pressesEnded:withEvent:),
+                    @selector(pressesCancelled:withEvent:), @selector(pressesChanged:withEvent:) };
+    unsigned int n = 0; int hooked = 0;
+    const char **names = objc_copyClassNamesForImage(_dyld_get_image_name(0), &n);
+    for (unsigned int i = 0; names && i < n; i++) {
+        Class c = objc_getClass(names[i]);
+        if (!c) continue;
+        unsigned int mcount = 0;
+        Method *ml = class_copyMethodList(c, &mcount);
+        for (unsigned int j = 0; ml && j < mcount; j++) {
+            for (int q = 0; q < 4; q++) {
+                if (!sel_isEqual(method_getName(ml[j]), sels[q])) continue;
+                g_fnkbmPressOrig[[NSString stringWithFormat:@"%p/%s", (void *)c, sel_getName(sels[q])]] =
+                    [NSValue valueWithPointer:(void *)method_getImplementation(ml[j])];
+                method_setImplementation(ml[j], (IMP)fnkbmHookedPresses);
+                hooked++;
+                KLOG("key translation: hooked %{public}s %{public}s", names[i], sel_getName(sels[q]));
+            }
+        }
+        free(ml);
+    }
+    free(names);
+    if (hooked == 0) { KLOG("key translation off: the game has no key press methods"); return; }
+    g_origUIKeyKeyCode = (NSInteger (*)(id, SEL))method_getImplementation(mk);
+    method_setImplementation(mk, (IMP)fnkbmHookedKeyCode);
+    if (mc) { g_origUIKeyCharacters = (NSString *(*)(id, SEL))method_getImplementation(mc); method_setImplementation(mc, (IMP)fnkbmHookedCharacters); }
+    g_fnkbmKeysInProcess = YES;
+    KLOG("key translation on (%d methods)", hooked);
+}
+
+// ── Keep running while another app is in front ──────────────────────────
+// On losing focus the game is told it is going inactive and into the
+// background, and it pauses itself. With this on, those calls are withheld
+// (and the matching "back again" calls with them), so the game keeps running.
+// The tweak still follows the real focus state for its own input handling.
+static BOOL g_fnkbmStayActive = YES;
+static NSMutableDictionary<NSString *, NSValue *> *g_fnkbmLifeOrig = nil;
+static BOOL g_fnkbmWithheld[2][2] = {{NO, NO}, {NO, NO}};   // [application|scene][inactive|background]
+
+static IMP fnkbmLifeOrigFor(id obj, SEL sel) {
+    for (Class c = object_getClass(obj); c; c = class_getSuperclass(c)) {
+        NSValue *v = g_fnkbmLifeOrig[[NSString stringWithFormat:@"%p/%s", (void *)c, sel_getName(sel)]];
+        if (v) return (IMP)v.pointerValue;
+    }
+    return NULL;
+}
+static void fnkbmRealFocus(BOOL active);
+static void fnkbmHookedLifecycle(id self, SEL _cmd, id arg) {
+    const char *name = sel_getName(_cmd);
+    int who = (strncmp(name, "scene", 5) == 0) ? 1 : 0;
+    BOOL goesInactive = strstr(name, "WillResignActive") != NULL, goesBackground = strstr(name, "DidEnterBackground") != NULL;
+    BOOL comesActive = strstr(name, "DidBecomeActive") != NULL, comesForeground = strstr(name, "WillEnterForeground") != NULL;
+    if (goesInactive) fnkbmRealFocus(NO);
+    if (comesActive) fnkbmRealFocus(YES);
+    if (g_fnkbmStayActive && (goesInactive || goesBackground)) {
+        g_fnkbmWithheld[who][goesBackground ? 1 : 0] = YES;
+        KLOG("%{public}s withheld, game keeps running", name);
+        return;
+    }
+    if (comesActive && g_fnkbmWithheld[who][0]) { g_fnkbmWithheld[who][0] = NO; KLOG("%{public}s withheld (it never left)", name); return; }
+    if (comesForeground && g_fnkbmWithheld[who][1]) { g_fnkbmWithheld[who][1] = NO; KLOG("%{public}s withheld (it never left)", name); return; }
+    IMP orig = fnkbmLifeOrigFor(self, _cmd);
+    if (orig) ((void (*)(id, SEL, id))orig)(self, _cmd, arg);
+}
+// Mouse buttons the game believes are held are let go when focus is really lost.
+static void fnkbmReleaseHeldForGame(void) {
+    for (int slot = 0; slot < FNKBM_BTN_SLOTS; slot++) {
+        int code = slot + MOUSE_BUTTON_MIDDLE;
+        int i = code == MOUSE_BUTTON_LEFT ? 0 : code == MOUSE_BUTTON_RIGHT ? 1 : code == MOUSE_BUTTON_MIDDLE ? 2 : -1;
+        if (i >= 0 && (g_fnkbmFwdPressed[slot] || g_fnkbmFwdValue[slot]) && g_fnkbmGameBtnHandler[i])
+            g_fnkbmGameBtnHandler[i](g_fnkbmGameBtn[i], 0.0f, NO);
+        g_fnkbmFwdPressed[slot] = NO; g_fnkbmFwdValue[slot] = NO; g_fnkbmKeyDown[slot] = 0;
+    }
+    for (int i = 0; i < 3; i++) fnkbmGameMouseButton(i == 0 ? MOUSE_BUTTON_LEFT : i == 1 ? MOUSE_BUTTON_RIGHT : MOUSE_BUTTON_MIDDLE, NO);
+    rightButtonIsPressed = NO;
+}
+// The app really left the front, or came back. Driven by the calls above:
+// the app-level notifications never arrive here, and the app always reports
+// itself active. On leaving, held buttons are let go and a locked cursor is
+// handed back, so the other app gets the mouse. On return the cursor follows
+// the game's state again.
+static void fnkbmRealFocus(BOOL active) {
+    if (atomic_exchange(&g_fnkbmRealActive, (bool)active) == (bool)active) return;
+    if (!active) {
+        fnkbmReleaseHeldForGame();
+        BOOL wasLocked = isMouseLocked;
+        if (wasLocked) {
+            isMouseLocked = NO;
+            updateMouseLock(NO, CGPointZero);
+            resetControllerState();
+        }
+        KLOG("focus lost (stay active=%d, cursor was locked=%d)", g_fnkbmStayActive, wasLocked);
+    } else {
+        KLOG("focus back");
+        fnkbmApplyGameCursor("focus back");
+    }
+}
+static void fnkbmInstallStayActive(void) {
+    g_fnkbmStayActive = YES;  // no panel to switch it: always on
+    g_fnkbmLifeOrig = [NSMutableDictionary dictionary];
+    const char *selNames[8] = { "applicationWillResignActive:", "applicationDidEnterBackground:", "applicationWillEnterForeground:", "applicationDidBecomeActive:",
+                                "sceneWillResignActive:", "sceneDidEnterBackground:", "sceneWillEnterForeground:", "sceneDidBecomeActive:" };
+    unsigned int n = 0; int hooked = 0;
+    const char **names = objc_copyClassNamesForImage(_dyld_get_image_name(0), &n);
+    for (unsigned int i = 0; names && i < n; i++) {
+        Class c = objc_getClass(names[i]);
+        if (!c) continue;
+        unsigned int mcount = 0;
+        Method *ml = class_copyMethodList(c, &mcount);
+        for (unsigned int j = 0; ml && j < mcount; j++) {
+            const char *mn = sel_getName(method_getName(ml[j]));
+            for (int q = 0; q < 8; q++) {
+                if (strcmp(mn, selNames[q]) != 0) continue;
+                g_fnkbmLifeOrig[[NSString stringWithFormat:@"%p/%s", (void *)c, mn]] = [NSValue valueWithPointer:(void *)method_getImplementation(ml[j])];
+                method_setImplementation(ml[j], (IMP)fnkbmHookedLifecycle);
+                hooked++;
+                KLOG("stay active: hooked %{public}s %{public}s", names[i], mn);
+            }
+        }
+        free(ml);
+    }
+    free(names);
+    KLOG("stay active=%d (%d methods)", g_fnkbmStayActive, hooked);
+}
+
+// ── Frame rate unlock ────────────────────────────────────────────────────
+// Two things hold the frame rate to the display: the Metal layer waits for
+// the display's refresh before showing a frame (vsync), and the game's frame
+// pacer releases one frame per display refresh. With the unlock on, the layer
+// stops waiting, and the pacer is released far more often than the display
+// refreshes. The game may still cap frames with its own limiter; the measured
+// rate is logged every few seconds so that can be seen.
+static BOOL g_fnkbmFpsUnlock = YES;
+static void (*g_origSetDisplaySync)(id, SEL, BOOL) = NULL;
+static id (*g_origNextDrawable)(id, SEL) = NULL;
+static void (*g_origPacerSignal)(id, SEL, id) = NULL;
+static __weak id g_fnkbmLayer = nil;
+static id g_fnkbmPacer = nil, g_fnkbmPacerParam = nil;
+static SEL g_fnkbmPacerSel = NULL;
+static _Atomic long g_fnkbmFrames = 0, g_fnkbmRealSignals = 0, g_fnkbmBoostSignals = 0, g_fnkbmDrawableWait = 0;
+static dispatch_source_t g_fnkbmBoostTimer = nil, g_fnkbmFpsLogTimer = nil;
+// The game's pacer method is never entered from two threads at once.
+static pthread_mutex_t g_fnkbmPacerLock = PTHREAD_MUTEX_INITIALIZER;
+
+// ── Stall detector (diagnostic build) ────────────────────────────────────
+// Counts entries and returns of the frame calls this tweak already sits on, plus
+// the Metal command buffer's commit and wait calls. When no new frame has been
+// asked for in two seconds, it logs which of them is still in progress.
+static _Atomic long g_dgNdIn = 0, g_dgNdOut = 0, g_dgNdNil = 0, g_dgPresIn = 0, g_dgPresOut = 0, g_dgCbPresIn = 0, g_dgCbPresOut = 0;
+static _Atomic long g_dgCommitIn = 0, g_dgCommitOut = 0, g_dgWaitSIn = 0, g_dgWaitSOut = 0, g_dgWaitCIn = 0, g_dgWaitCOut = 0;
+static _Atomic long g_dgSigRealIn = 0, g_dgSigRealOut = 0, g_dgSigBoostIn = 0, g_dgSigBoostOut = 0;
+static _Atomic uint64_t g_dgNdTin = 0, g_dgNdTout = 0, g_dgPresT = 0, g_dgCommitT = 0, g_dgSigT = 0, g_dgWaitCT = 0;
+static double fnkbmDgMsSince(uint64_t t) {
+    if (t == 0) return -1.0;
+    static mach_timebase_info_data_t tb; if (tb.denom == 0) mach_timebase_info(&tb);
+    return (double)(mach_absolute_time() - t) * tb.numer / tb.denom / 1e6;
+}
+// ── Frame semaphore watch ────────────────────────────────────────────────
+// After it presents a frame, the game's renderer waits without a time limit on a
+// semaphore that is released when the previous frame has finished on the graphics
+// card. These two system calls are counted for that one semaphore. If that wait
+// lasts longer than 400 ms it is released once from here, so the renderer goes on.
+// The wait is recognised by where it is called from (present function, 43.10).
+#define FNKBM_FS_SITE_OFFSET 0x20dc494UL   // return address of that wait, counted from the start of the game file
+static intptr_t (*orig_dsema_wait)(dispatch_semaphore_t, dispatch_time_t) = NULL;
+static intptr_t (*orig_dsema_signal)(dispatch_semaphore_t) = NULL;
+static _Atomic(void *) g_fsSem = NULL;
+static _Atomic uint64_t g_fsWaitStart = 0;   // start of the wait in progress, 0 = none
+static _Atomic long g_fsWaitIn = 0, g_fsWaitOut = 0, g_fsSignals = 0, g_fsForced = 0;
+static intptr_t hooked_dsema_wait(dispatch_semaphore_t sem, dispatch_time_t timeout) {
+    static _Atomic uintptr_t site = 0, notSite = 0;
+    uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+    if (timeout == DISPATCH_TIME_FOREVER && (ra & 0x3FFF) == (FNKBM_FS_SITE_OFFSET & 0x3FFF) && atomic_load(&site) == 0 && atomic_load(&notSite) != ra) {
+        // First time this address is seen: it counts only if it is that place inside the game's own program file.
+        Dl_info di;
+        if (dladdr((const void *)ra, &di) && di.dli_fbase && ((const struct mach_header_64 *)di.dli_fbase)->filetype == MH_EXECUTE && ra - (uintptr_t)di.dli_fbase == FNKBM_FS_SITE_OFFSET) atomic_store(&site, ra);
+        else atomic_store(&notSite, ra);
+    }
+    if (timeout == DISPATCH_TIME_FOREVER && ra == atomic_load(&site) && ra != 0) {
+        atomic_store(&g_fsSem, (__bridge void *)sem);
+        atomic_fetch_add(&g_fsWaitIn, 1);
+        atomic_store(&g_fsWaitStart, mach_absolute_time());
+        intptr_t r = orig_dsema_wait(sem, timeout);
+        atomic_store(&g_fsWaitStart, 0);
+        atomic_fetch_add(&g_fsWaitOut, 1);
+        return r;
+    }
+    return orig_dsema_wait(sem, timeout);
+}
+static intptr_t hooked_dsema_signal(dispatch_semaphore_t sem) {
+    if ((__bridge void *)sem == atomic_load(&g_fsSem)) atomic_fetch_add(&g_fsSignals, 1);
+    return orig_dsema_signal(sem);
+}
+static void (*g_dgOrigCommit)(id, SEL) = NULL, (*g_dgOrigWaitS)(id, SEL) = NULL, (*g_dgOrigWaitC)(id, SEL) = NULL;
+static void dgCommit(id self, SEL _cmd) { atomic_fetch_add(&g_dgCommitIn, 1); atomic_store(&g_dgCommitT, mach_absolute_time()); g_dgOrigCommit(self, _cmd); atomic_fetch_add(&g_dgCommitOut, 1); }
+static void dgWaitScheduled(id self, SEL _cmd) { atomic_fetch_add(&g_dgWaitSIn, 1); g_dgOrigWaitS(self, _cmd); atomic_fetch_add(&g_dgWaitSOut, 1); }
+static void dgWaitCompleted(id self, SEL _cmd) { atomic_fetch_add(&g_dgWaitCIn, 1); atomic_store(&g_dgWaitCT, mach_absolute_time()); g_dgOrigWaitC(self, _cmd); atomic_fetch_add(&g_dgWaitCOut, 1); }
+// Called once with the class of a real command buffer.
+static void fnkbmDgHookCommandBuffer(id buffer) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class c = object_getClass(buffer);
+        Method a = class_getInstanceMethod(c, NSSelectorFromString(@"commit"));
+        Method b = class_getInstanceMethod(c, NSSelectorFromString(@"waitUntilScheduled"));
+        Method d = class_getInstanceMethod(c, NSSelectorFromString(@"waitUntilCompleted"));
+        if (a) { g_dgOrigCommit = (void (*)(id, SEL))method_getImplementation(a); method_setImplementation(a, (IMP)dgCommit); }
+        if (b) { g_dgOrigWaitS = (void (*)(id, SEL))method_getImplementation(b); method_setImplementation(b, (IMP)dgWaitScheduled); }
+        if (d) { g_dgOrigWaitC = (void (*)(id, SEL))method_getImplementation(d); method_setImplementation(d, (IMP)dgWaitCompleted); }
+        KLOG("stall detector: command buffer class %{public}s, hooks commit=%d waitScheduled=%d waitCompleted=%d", class_getName(c), a != NULL, b != NULL, d != NULL);
+    });
+}
+
+// ── Low latency frame handling ───────────────────────────────────────────
+// A frame the game has finished waits in a queue until the display takes it.
+// With three drawables two frames can wait, so what is on screen is up to a
+// frame older than it needs to be. With two drawables only one can wait.
+// A present that asks for a minimum time on screen, or for a set time, is
+// turned into a plain present, so no frame is held back on purpose.
+// The time from present to screen is measured and logged.
+static BOOL g_fnkbmLowLatency = YES;
+static _Atomic long g_fnkbmPresPlain = 0, g_fnkbmPresAfter = 0, g_fnkbmPresAt = 0, g_fnkbmShown = 0, g_fnkbmNotShown = 0;
+static _Atomic long g_fnkbmHeldTicks = 0, g_fnkbmHeldN = 0, g_fnkbmToScreenUs = 0, g_fnkbmToScreenMaxUs = 0;
+static _Atomic uint64_t g_fnkbmAcquireTick = 0;
+static _Atomic int g_fnkbmFullscreen = -1;
+
+// Main thread. Game Mode and direct display only come with real full screen.
+static void fnkbmReadFullscreen(void) {
+    Class appClass = NSClassFromString(@"NSApplication");
+    id app = appClass ? ((id (*)(Class, SEL))objc_msgSend)(appClass, NSSelectorFromString(@"sharedApplication")) : nil;
+    if (!app) return;
+    id win = ((id (*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(@"mainWindow"));
+    if (!win) win = [((NSArray *(*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(@"windows")) firstObject];
+    if (!win) return;
+    NSUInteger mask = ((NSUInteger (*)(id, SEL))objc_msgSend)(win, NSSelectorFromString(@"styleMask"));
+    atomic_store(&g_fnkbmFullscreen, (mask & (1UL << 14)) ? 1 : 0);
+}
+static void fnkbmInstallLowLatency(void) {
+    g_fnkbmLowLatency = NO;
+    KLOG("low latency removed: frames and presents are left to the game");
+    // Switches in the panel: smoothing and keep-running take effect at once.
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"fnkbm.optionsChanged" object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        id sm = [d objectForKey:@"fnkbm.mouseSmooth"], st = [d objectForKey:@"fnkbm.stayActive"];
+        g_fnkbmMouseSmooth = sm ? [sm boolValue] : YES;
+        g_fnkbmStayActive = st ? [st boolValue] : YES;
+        KLOG("options changed: smoothing=%d stay active=%d", g_fnkbmMouseSmooth, g_fnkbmStayActive);
+    }];
+}
+
+static void fnkbmApplyDisplaySync(void) {
+    id layer = g_fnkbmLayer;
+    if (!layer || !g_origSetDisplaySync) return;
+    g_origSetDisplaySync(layer, NSSelectorFromString(@"setDisplaySyncEnabled:"), g_fnkbmFpsUnlock ? NO : YES);
+}
+static void hooked_setDisplaySync(id self, SEL _cmd, BOOL enabled) {
+    static int said = 0;
+    if (said < 4) { said++; KLOG("game set display sync=%d, unlock=%d", enabled, g_fnkbmFpsUnlock); }
+    g_origSetDisplaySync(self, _cmd, g_fnkbmFpsUnlock ? NO : enabled);
+}
+static id hooked_nextDrawable(id self, SEL _cmd) {
+    if (g_fnkbmLayer != self) {
+        g_fnkbmLayer = self;
+        NSUInteger had = ((NSUInteger (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"maximumDrawableCount"));
+        KLOG("frame layer %p, display sync hook=%d, drawable count %lu -> %lu", self, g_origSetDisplaySync != NULL, (unsigned long)had,
+             (unsigned long)((NSUInteger (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"maximumDrawableCount")));
+        fnkbmApplyDisplaySync();
+    }
+    atomic_fetch_add(&g_fnkbmFrames, 1);
+    uint64_t t0 = mach_absolute_time();
+    atomic_fetch_add(&g_dgNdIn, 1); atomic_store(&g_dgNdTin, t0);
+    id drawable = g_origNextDrawable(self, _cmd);
+    uint64_t t1 = mach_absolute_time();
+    atomic_fetch_add(&g_dgNdOut, 1); atomic_store(&g_dgNdTout, t1); if (!drawable) atomic_fetch_add(&g_dgNdNil, 1);
+    atomic_fetch_add(&g_fnkbmDrawableWait, (long)(t1 - t0));
+    atomic_store(&g_fnkbmAcquireTick, t1);
+    return drawable;
+}
+static void hooked_pacerSignal(id self, SEL _cmd, id param) {
+    g_fnkbmPacer = self; g_fnkbmPacerParam = param; g_fnkbmPacerSel = _cmd;
+    atomic_fetch_add(&g_fnkbmRealSignals, 1);
+    atomic_fetch_add(&g_dgSigRealIn, 1); atomic_store(&g_dgSigT, mach_absolute_time());
+    pthread_mutex_lock(&g_fnkbmPacerLock);
+    g_origPacerSignal(self, _cmd, param);
+    pthread_mutex_unlock(&g_fnkbmPacerLock);
+    atomic_fetch_add(&g_dgSigRealOut, 1);
+}
+// Frame rate unlock, part 3: the game presents each frame with "stay on screen
+// for at least 1/120 s". That alone holds it to 120. With the unlock on, such a
+// present (and a present at a set time) becomes a plain present.
+static void (*g_origDrawablePresent)(id, SEL) = NULL;
+static void (*g_origDrawablePresentAfter)(id, SEL, CFTimeInterval) = NULL;
+static void (*g_origDrawablePresentAt)(id, SEL, CFTimeInterval) = NULL;
+static __thread int t_fnkbmPresentDepth = 0;   // one present method may call another
+static void hooked_drawablePresent(id self, SEL _cmd) {
+    BOOL outer0 = (t_fnkbmPresentDepth++ == 0);
+    if (outer0) { atomic_fetch_add(&g_fnkbmPresPlain, 1); atomic_fetch_add(&g_dgPresIn, 1); atomic_store(&g_dgPresT, mach_absolute_time()); }
+    g_origDrawablePresent(self, _cmd);
+    if (outer0) atomic_fetch_add(&g_dgPresOut, 1);
+    t_fnkbmPresentDepth--;
+}
+static void hooked_drawablePresentAfter(id self, SEL _cmd, CFTimeInterval duration) {
+    BOOL outer = (t_fnkbmPresentDepth++ == 0);
+    if (outer) { atomic_fetch_add(&g_fnkbmPresAfter, 1); atomic_fetch_add(&g_dgPresIn, 1); atomic_store(&g_dgPresT, mach_absolute_time()); }
+    if (outer && g_fnkbmFpsUnlock) g_origDrawablePresent(self, NSSelectorFromString(@"present"));
+    else g_origDrawablePresentAfter(self, _cmd, duration);
+    if (outer) atomic_fetch_add(&g_dgPresOut, 1);
+    t_fnkbmPresentDepth--;
+}
+static void hooked_drawablePresentAt(id self, SEL _cmd, CFTimeInterval when) {
+    BOOL outer = (t_fnkbmPresentDepth++ == 0);
+    if (outer) { atomic_fetch_add(&g_fnkbmPresAt, 1); atomic_fetch_add(&g_dgPresIn, 1); atomic_store(&g_dgPresT, mach_absolute_time()); }
+    if (outer && g_fnkbmFpsUnlock) g_origDrawablePresent(self, NSSelectorFromString(@"present"));
+    else g_origDrawablePresentAt(self, _cmd, when);
+    if (outer) atomic_fetch_add(&g_dgPresOut, 1);
+    t_fnkbmPresentDepth--;
+}
+static void fnkbmSetFpsUnlock(BOOL on, const char *why) {
+    g_fnkbmFpsUnlock = on;
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kFnKbmFpsUnlockKey];
+    fnkbmApplyDisplaySync();
+    KLOG("fps unlock=%d (%{public}s)", on, why);
+}
+static void fnkbmInstallFpsUnlock(void) {
+    id saved = [[NSUserDefaults standardUserDefaults] objectForKey:kFnKbmFpsUnlockKey];
+    (void)saved;
+    g_fnkbmFpsUnlock = YES;  // test build: always on, there is no key or panel to switch it
+    Class drawableClass = objc_getClass("CAMetalDrawable");
+    Method p0 = drawableClass ? class_getInstanceMethod(drawableClass, NSSelectorFromString(@"present")) : NULL;
+    Method p1 = drawableClass ? class_getInstanceMethod(drawableClass, NSSelectorFromString(@"presentAfterMinimumDuration:")) : NULL;
+    Method p2 = drawableClass ? class_getInstanceMethod(drawableClass, NSSelectorFromString(@"presentAtTime:")) : NULL;
+    if (p0 && p1 && p2) {
+        g_origDrawablePresent = (void (*)(id, SEL))method_getImplementation(p0); method_setImplementation(p0, (IMP)hooked_drawablePresent);
+        g_origDrawablePresentAfter = (void (*)(id, SEL, CFTimeInterval))method_getImplementation(p1); method_setImplementation(p1, (IMP)hooked_drawablePresentAfter);
+        g_origDrawablePresentAt = (void (*)(id, SEL, CFTimeInterval))method_getImplementation(p2); method_setImplementation(p2, (IMP)hooked_drawablePresentAt);
+    }
+    KLOG("fps unlock: present hooks=%d", g_origDrawablePresent != NULL);
+    Class layerClass = objc_getClass("CAMetalLayer");
+    Method m = class_getInstanceMethod(layerClass, NSSelectorFromString(@"setDisplaySyncEnabled:"));
+    if (m) { g_origSetDisplaySync = (void (*)(id, SEL, BOOL))method_getImplementation(m); method_setImplementation(m, (IMP)hooked_setDisplaySync); }
+    Method n = class_getInstanceMethod(layerClass, NSSelectorFromString(@"nextDrawable"));
+    if (n) { g_origNextDrawable = (id (*)(id, SEL))method_getImplementation(n); method_setImplementation(n, (IMP)hooked_nextDrawable); }
+    Class pacerClass = objc_getClass("FIOSFramePacer");
+    Method p = pacerClass ? class_getInstanceMethod(pacerClass, NSSelectorFromString(@"signal:")) : NULL;
+    if (p) { g_origPacerSignal = (void (*)(id, SEL, id))method_getImplementation(p); method_setImplementation(p, (IMP)hooked_pacerSignal); }
+    KLOG("fps unlock=%d hooks: displaySync=%d nextDrawable=%d pacer=%d", g_fnkbmFpsUnlock, m != NULL, n != NULL, p != NULL);
+
+    // Extra pacer releases, about one per millisecond, while the unlock is on.
+    dispatch_queue_t bq = dispatch_queue_create("fnkbm.pacerboost", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+    g_fnkbmBoostTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, DISPATCH_TIMER_STRICT, bq);
+    dispatch_source_set_timer(g_fnkbmBoostTimer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), NSEC_PER_MSEC, 0);
+    dispatch_source_set_event_handler(g_fnkbmBoostTimer, ^{
+        BOOL unfocusedRun = g_fnkbmStayActive && !atomic_load(&g_fnkbmRealActive);
+        if ((!g_fnkbmFpsUnlock && !unfocusedRun) || !g_origPacerSignal) return;
+        id pacer = g_fnkbmPacer, param = g_fnkbmPacerParam;
+        if (!pacer || !g_fnkbmPacerSel) return;
+        atomic_fetch_add(&g_dgSigBoostIn, 1);
+        pthread_mutex_lock(&g_fnkbmPacerLock);
+        g_origPacerSignal(pacer, g_fnkbmPacerSel, param);
+        pthread_mutex_unlock(&g_fnkbmPacerLock);
+        atomic_fetch_add(&g_dgSigBoostOut, 1);
+        atomic_fetch_add(&g_fnkbmBoostSignals, 1);
+    });
+    dispatch_resume(g_fnkbmBoostTimer);
+
+    // Frame semaphore watch: every 50 ms. A wait older than 400 ms is released once.
+    static dispatch_source_t fsTimer;
+    fsTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, DISPATCH_TIMER_STRICT, dispatch_queue_create("fnkbm.framesem", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0)));
+    dispatch_source_set_timer(fsTimer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), 50 * NSEC_PER_MSEC, 5 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(fsTimer, ^{
+        static uint64_t released = 0;
+        uint64_t ws = atomic_load(&g_fsWaitStart);
+        if (ws == 0 || ws == released || !orig_dsema_signal) return;
+        double ms = fnkbmDgMsSince(ws);
+        if (ms < 400.0) return;
+        void *sem = atomic_load(&g_fsSem);
+        if (!sem || atomic_load(&g_fsWaitStart) != ws) return;
+        released = ws;
+        long n = atomic_fetch_add(&g_fsForced, 1) + 1;
+        long in = atomic_load(&g_fsWaitIn), sig = atomic_load(&g_fsSignals);
+        orig_dsema_signal((__bridge dispatch_semaphore_t)sem);
+        if (n <= 30 || (n % 50) == 0) KLOG("FRAME SEMAPHORE: wait %ld had lasted %.0f ms with no release (releases seen so far %ld); released from the tweak, time %ld", in, ms, sig, n);
+    });
+    dispatch_resume(fsTimer);
+
+    // Stall detector: twice a second, looks whether a new frame was asked for.
+    static dispatch_source_t dgTimer;
+    dgTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(dgTimer, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), NSEC_PER_SEC / 2, NSEC_PER_SEC / 20);
+    dispatch_source_set_event_handler(dgTimer, ^{
+        static long lastIn = -1; static int quiet = 0, reports = 0;
+        long in = atomic_load(&g_dgNdIn);
+        if (in != lastIn) { if (reports) KLOG("STALL over: frames are being asked for again"); lastIn = in; quiet = 0; reports = 0; return; }
+        quiet++;
+        if (in < 300 || reports >= 3 || (quiet != 4 && quiet != 14 && quiet != 40)) return;   // at 2 s, 7 s and 20 s without a frame
+        reports++;
+        long ndOut = atomic_load(&g_dgNdOut);
+        id layer = g_fnkbmLayer; int sync = -1, timeout = -1, trans = -1; unsigned long count = 0; CGSize size = CGSizeZero;
+        if (layer) {
+            sync = (int)((BOOL (*)(id, SEL))objc_msgSend)(layer, NSSelectorFromString(@"displaySyncEnabled"));
+            timeout = (int)((BOOL (*)(id, SEL))objc_msgSend)(layer, NSSelectorFromString(@"allowsNextDrawableTimeout"));
+            trans = (int)((BOOL (*)(id, SEL))objc_msgSend)(layer, NSSelectorFromString(@"presentsWithTransaction"));
+            count = (unsigned long)((NSUInteger (*)(id, SEL))objc_msgSend)(layer, NSSelectorFromString(@"maximumDrawableCount"));
+            size = ((CGSize (*)(id, SEL))objc_msgSend)(layer, NSSelectorFromString(@"drawableSize"));
+        }
+        KLOG("STALL %d: no new frame for %.1f s. In progress now: nextDrawable=%ld drawablePresent=%ld bufferPresent=%ld commit=%ld waitScheduled=%ld waitCompleted=%ld pacerDisplay=%ld pacerExtra=%ld",
+             reports, quiet / 2.0, in - ndOut, atomic_load(&g_dgPresIn) - atomic_load(&g_dgPresOut), atomic_load(&g_dgCbPresIn) - atomic_load(&g_dgCbPresOut),
+             atomic_load(&g_dgCommitIn) - atomic_load(&g_dgCommitOut), atomic_load(&g_dgWaitSIn) - atomic_load(&g_dgWaitSOut), atomic_load(&g_dgWaitCIn) - atomic_load(&g_dgWaitCOut),
+             atomic_load(&g_dgSigRealIn) - atomic_load(&g_dgSigRealOut), atomic_load(&g_dgSigBoostIn) - atomic_load(&g_dgSigBoostOut));
+        KLOG("STALL %d totals: nextDrawable asked=%ld returned=%ld nil=%ld, drawable presents=%ld, buffer presents=%ld, commits=%ld, waitCompleted=%ld, pacer display=%ld extra=%ld",
+             reports, in, ndOut, atomic_load(&g_dgNdNil), atomic_load(&g_dgPresOut), atomic_load(&g_dgCbPresOut), atomic_load(&g_dgCommitOut), atomic_load(&g_dgWaitCOut),
+             atomic_load(&g_dgSigRealOut), atomic_load(&g_dgSigBoostOut));
+        KLOG("STALL %d ms since last: nextDrawable asked=%.0f returned=%.0f, drawable present=%.0f, commit=%.0f, waitCompleted=%.0f, pacer display signal=%.0f",
+             reports, fnkbmDgMsSince(atomic_load(&g_dgNdTin)), fnkbmDgMsSince(atomic_load(&g_dgNdTout)), fnkbmDgMsSince(atomic_load(&g_dgPresT)),
+             fnkbmDgMsSince(atomic_load(&g_dgCommitT)), fnkbmDgMsSince(atomic_load(&g_dgWaitCT)), fnkbmDgMsSince(atomic_load(&g_dgSigT)));
+        uint64_t fsStart = atomic_load(&g_fsWaitStart);
+        KLOG("STALL %d frame semaphore: hooks wait=%d signal=%d, wait in progress=%d for %.0f ms, waits started=%ld returned=%ld, releases seen=%ld, released from the tweak=%ld",
+             reports, orig_dsema_wait != NULL, orig_dsema_signal != NULL, fsStart != 0, fsStart ? fnkbmDgMsSince(fsStart) : 0.0,
+             atomic_load(&g_fsWaitIn), atomic_load(&g_fsWaitOut), atomic_load(&g_fsSignals), atomic_load(&g_fsForced));
+        KLOG("STALL %d layer: display sync=%d, drawables=%lu, nextDrawable timeout allowed=%d, presents with transaction=%d, size=%.0fx%.0f; unlock=%d, in front=%d, cursor locked=%d",
+             reports, sync, count, timeout, trans, size.width, size.height, g_fnkbmFpsUnlock, (int)atomic_load(&g_fnkbmRealActive), isMouseLocked);
+    });
+    dispatch_resume(dgTimer);
+
+    // Measured frame rate, every five seconds while frames are being drawn.
+    g_fnkbmFpsLogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(g_fnkbmFpsLogTimer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), 5 * NSEC_PER_SEC, NSEC_PER_SEC / 10);
+    dispatch_source_set_event_handler(g_fnkbmFpsLogTimer, ^{
+        long f = atomic_exchange(&g_fnkbmFrames, 0), r = atomic_exchange(&g_fnkbmRealSignals, 0), b = atomic_exchange(&g_fnkbmBoostSignals, 0);
+        long w = atomic_exchange(&g_fnkbmDrawableWait, 0);
+        if (f == 0) return;
+        static mach_timebase_info_data_t tb; if (tb.denom == 0) mach_timebase_info(&tb);
+        double waitMs = (double)w * tb.numer / tb.denom / 1e6 / (double)f;
+        long ge = atomic_exchange(&g_fnkbmGcEvents, 0), hv = atomic_exchange(&g_fnkbmHidValues, 0), hf = atomic_exchange(&g_fnkbmHidForwarded, 0);
+        id syncLayer = g_fnkbmLayer; SEL syncSel = NSSelectorFromString(@"displaySyncEnabled");
+        int syncNow = (syncLayer && [syncLayer respondsToSelector:syncSel]) ? (int)((BOOL (*)(id, SEL))objc_msgSend)(syncLayer, syncSel) : -1;
+        static long fsLastForced = 0; long fsForced = atomic_load(&g_fsForced);
+        if (fsForced != fsLastForced || atomic_load(&g_fsWaitIn) == 0) { KLOG("frame semaphore over 5s: waits so far=%ld, releases seen=%ld, released from the tweak=%ld (new %ld)", atomic_load(&g_fsWaitIn), atomic_load(&g_fsSignals), fsForced, fsForced - fsLastForced); fsLastForced = fsForced; }
+        KLOG("fps=%.0f over 5s (unlock=%d, display sync now=%d, pacer releases per second: display=%.0f extra=%.0f, wait for a frame slot=%.2f ms)", f / 5.0, g_fnkbmFpsUnlock, syncNow, r / 5.0, b / 5.0, waitMs);
+        long hn = atomic_exchange(&g_fnkbmHeldN, 0), ht = atomic_exchange(&g_fnkbmHeldTicks, 0);
+        long sh = atomic_exchange(&g_fnkbmShown, 0), ns = atomic_exchange(&g_fnkbmNotShown, 0), su = atomic_exchange(&g_fnkbmToScreenUs, 0), smax = atomic_exchange(&g_fnkbmToScreenMaxUs, 0);
+        long pp = atomic_exchange(&g_fnkbmPresPlain, 0), pa = atomic_exchange(&g_fnkbmPresAfter, 0), pt = atomic_exchange(&g_fnkbmPresAt, 0);
+        KLOG("frame timing over 5s: held before present=%.2f ms, present to screen=%.2f ms (longest %.2f), shown=%ld, not shown=%ld, presents plain=%ld min-duration=%ld timed=%ld, low latency=%d, fullscreen=%d, borderless=%d",
+             hn ? (double)ht * tb.numer / tb.denom / 1e6 / (double)hn : 0.0, sh ? (double)su / 1000.0 / (double)sh : 0.0, (double)smax / 1000.0, sh, ns, pp, pa, pt,
+             g_fnkbmLowLatency, atomic_load(&g_fnkbmFullscreen), isBorderlessModeEnabled);
+        dispatch_async(dispatch_get_main_queue(), ^{ fnkbmReadFullscreen(); });
+        long fd = atomic_exchange(&g_fnkbmFeedDirect, 0), fh = atomic_exchange(&g_fnkbmFeedHeld, 0);
+        if (ge || hv) KLOG("mouse over 5s: GameController events=%ld, device values=%ld, device values passed to game=%ld, report interval=%.1f ms, smoothed=%ld, straight through=%ld, focused=%d", ge, hv, hf, g_fnkbmSmooth.interval, fh, fd, (int)atomic_load(&g_fnkbmRealActive));
+    });
+    dispatch_resume(g_fnkbmFpsLogTimer);
 }
 
 %ctor {
@@ -1848,9 +3028,11 @@ static void setupHIDManager() {
         {"open", (void *)hooked_open, (void **)&orig_open},
         {"close", (void *)hooked_close, (void **)&orig_close},
         {"fopen", (void *)hooked_fopen, (void **)&orig_fopen},
-        {"fclose", (void *)hooked_fclose, (void **)&orig_fclose}
+        {"fclose", (void *)hooked_fclose, (void **)&orig_fclose},
+        {"dispatch_semaphore_wait", (void *)hooked_dsema_wait, (void **)&orig_dsema_wait},
+        {"dispatch_semaphore_signal", (void *)hooked_dsema_signal, (void **)&orig_dsema_signal}
     };
-    rebind_symbols(rebindings, 17);
+    rebind_symbols(rebindings, 19);
 
     NSString* currentVersion = @"6.0.0";
     NSString* lastVersion = [[NSUserDefaults standardUserDefaults] stringForKey:@"fnmactweak.lastSeenVersion"];
@@ -1888,6 +3070,22 @@ static void setupHIDManager() {
     loadKeyRemappings();
     loadFortniteKeybinds();
     loadControllerMappings();
+    KLOG("tweak loaded build=%{public}s ctrl=%d always=%d sens=%.0f/%.0f ads=%.0f keys typing=%ld lock=%ld panel=%ld",
+         __DATE__ " " __TIME__, isControllerModeEnabled, NATIVE_ALWAYS_ON, NATIVE_SENS_X, NATIVE_SENS_Y, NATIVE_ADS_SENS,
+         (long)FNKBM_KEY_TYPING, (long)FNKBM_KEY_LOCK, (long)FNKBM_KEY_PANEL);
+    KLOG("fps key=%ld", (long)FNKBM_KEY_FPS);
+    fnkbmWriteInputIni();
+    fnkbmCleanOldConfig();
+    fnkbmLogBinds("launch");
+    fnkbmStartLogFollower();
+    fnkbmInstallFpsUnlock();
+    fnkbmInstallLowLatency();
+    fnkbmInstallKeyTranslation();
+    fnkbmInstallStayActive();
+    fnkbmInstallMouseSmooth();
+#ifdef FNKBM_DEBUG
+    fnkbmDebugInstall();
+#endif
 
     // Install OS-level mouse button tap (Deeper than NSEvent monitor)
     void *cgHandle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_NOW);
@@ -1938,6 +3136,10 @@ static void setupHIDManager() {
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
+            // No virtual gamepad unless controller mode is on. A connected
+            // pad makes the game switch away from keyboard-and-mouse mode.
+            // Turning controller mode on takes effect at the next launch.
+            if (!isControllerModeEnabled) return;
             if (@available(iOS 15, *)) {
                 g_controllerLifecycleStarted = YES;
                 fnRefreshVirtualController();
@@ -1975,7 +3177,6 @@ static void setupHIDManager() {
         });
     }];
 
-    showWelcomePopupIfNeeded();
 
     isBorderlessModeEnabled = [tweakDefaults() boolForKey:kBorderlessWindowKey];
     // The NSWindow hook handles styling before the window appears.
@@ -2111,7 +3312,7 @@ static void setupHIDManager() {
             // If a keybind is mapped for this scroll direction, ALWAYS consume the
             // hardware event — never let raw scroll reach GCKit even when unlocked.
             // Exception: if the P settings panel is open, let scroll through.
-            if (kc != 0 && !isPopupVisible) {
+            if (kc != 0 && !isPopupVisible && isMouseLocked) {   // cursor free: falls through to the menu path below
                 if (isMouseLocked) {
                     // Inject with a small delay to ensure game registers the press (Rapid Fire)
                     _sendDualKeyEvent(kc, YES);
@@ -2122,8 +3323,21 @@ static void setupHIDManager() {
                 return nil; // consume remapped scroll
             }
 
-            // No keybind — normal scroll behavior requires lock
-            if (!isMouseLocked) return event;
+            // Cursor free, tweak panel closed: the wheel also goes to the game's own
+            // scroll handler, so its "press a key" prompt can bind wheel up and down.
+            if (!isMouseLocked) {
+                if (!isPopupVisible && NATIVE_ALWAYS_ON && !isControllerModeEnabled) {
+                    GCMouse *menuMouse = GCMouse.current;
+                    GCControllerDirectionPad *menuPad = menuMouse.mouseInput.scroll;
+                    if (menuPad && menuPad.valueChangedHandler) {
+                        g_fnkbmMenuScroll = YES;
+                        menuPad.valueChangedHandler(menuPad, 0.0f, (deltaY > 0) ? 1.0f : -1.0f);
+                        menuPad.valueChangedHandler(menuPad, 0.0f, 0.0f);
+                        g_fnkbmMenuScroll = NO;
+                    }
+                }
+                return event;
+            }
 
             // PRIORITY 3: Handle Raw Unmapped Game Scroll (Zero Delay)
             // Only reached when kc == 0 for this direction.
@@ -2180,8 +3394,33 @@ static void setupHIDManager() {
             static SEL cgEventSel = NULL;
             if (!cgEventSel) cgEventSel = NSSelectorFromString(@"CGEvent");
             CGEventRef cgEv = ((CGEventRef(*)(id,SEL))objc_msgSend)(event, cgEventSel);
-            if (cgEv && _CGEventGetIntegerValueField(cgEv, kCGEventSourceUserData) == 0x1337) return event;
             NSUInteger evType = ((NSUInteger(*)(id,SEL))objc_msgSend)(event, typeSel3);
+            if (cgEv && _CGEventGetIntegerValueField(cgEv, kCGEventSourceUserData) == 0x1337) {
+                // A key the tweak injected: note it so it is not translated again.
+                if (evType == 10 || evType == 11 || evType == 12) {
+                    unsigned short svk = ((unsigned short(*)(id,SEL))objc_msgSend)(event, NSSelectorFromString(@"keyCode"));
+                    GCKeyCode sgc = (svk < 128) ? nsVKToGC[svk] : 0;
+                    if (sgc > 0 && sgc < 512) g_fnkbmSynthHeld[sgc] = (evType == 10) ? YES : (evType == 11) ? NO : !g_fnkbmSynthHeld[sgc];
+                }
+                return event;
+            }
+
+            // Typing mode (raw input) on its own key. Checked before the bypass
+            // below so the same key also turns it off again.
+            if ((evType == 10 || evType == 11) && keyCaptureCallback == nil && !isPopupVisible) {
+                unsigned short vk0 = ((unsigned short(*)(id,SEL))objc_msgSend)(event, NSSelectorFromString(@"keyCode"));
+                GCKeyCode g0 = (vk0 < 128) ? nsVKToGC[vk0] : 0;
+                if (g0 != 0 && g0 == FNKBM_KEY_TYPING) {
+                    SEL rs0 = NSSelectorFromString(@"isARepeat");
+                    BOOL rep0 = [event respondsToSelector:rs0] ? ((BOOL(*)(id,SEL))objc_msgSend)(event, rs0) : NO;
+                    if (evType == 10 && !rep0) {
+                        isTypingModeEnabled = !isTypingModeEnabled;
+                        resetControllerState();
+                        KLOG("typing mode (raw input) = %d", isTypingModeEnabled);
+                    }
+                    return nil;
+                }
+            }
 
             // --- TYPING MODE BYPASS ---
             if (isTypingModeEnabled) return event;
@@ -2208,6 +3447,11 @@ static void setupHIDManager() {
                     if (btnNum == 2) currentBtnCode = MOUSE_BUTTON_MIDDLE;
                     else if (btnNum >= 3) currentBtnCode = (int)(MOUSE_BUTTON_AUX_BASE + (btnNum - 3));
                 }
+
+                // Native mode: GameController delivers every mouse button, to the
+                // game or to the key it is bound to. The UI event is not used,
+                // so it is dropped here before any touch or remap is made from it.
+                if (isGCMouseDirectActive && isMouseLocked && !isPopupVisible && !isTriggerHeld) return nil;
 
                 if (isPressed) {
                     if (mouseButtonCaptureCallback != nil || keyCaptureCallback != nil) {
@@ -2417,7 +3661,7 @@ static void setupHIDManager() {
                     }
 
                     // FORTNITE KEYBIND: check if this modifier is remapped to a default game key
-                    if (modGC < 512) {
+                    if (!(g_fnkbmKeysInProcess && g_fnkbmModsInProcess) && modGC < 512) {
                         // Check custom remap first
                         GCKeyCode customTarget = keyRemapArray[modGC];
                         GCKeyCode fnTarget = (modGC < 512) ? fortniteRemapArray[modGC] : 0;
@@ -2439,6 +3683,9 @@ static void setupHIDManager() {
                 }
 
                 fnm_option_check:;
+                // Native mode has no use for the Option "free the cursor" hold,
+                // so Left Option stays an ordinary key for the game.
+                if (NATIVE_ALWAYS_ON) return event;
                 NSUInteger flags = modFlags;
                 BOOL optNow = (flags & 0x80000) != 0; // NSEventModifierFlagOption
                 if (optNow == prevOptionHeld2) return event;
@@ -2489,13 +3736,21 @@ static void setupHIDManager() {
             if (nsVK >= 128) return event;
 
             GCKeyCode gck = nsVKToGC[nsVK];
+            SEL fnkbmRepSel = NSSelectorFromString(@"isARepeat");
+            BOOL fnkbmRep = [event respondsToSelector:fnkbmRepSel] ? ((BOOL(*)(id,SEL))objc_msgSend)(event, fnkbmRepSel) : NO;
+            if (!fnkbmRep) KLOG("key vk=%d gc=%ld pressed=%d lock=%d direct=%d popup=%d", (int)nsVK, (long)gck, pressed, isMouseLocked, isGCMouseDirectActive, isPopupVisible);
             if (gck != 0 && gck == GCMOUSE_DIRECT_KEY) {
                 updateGCMouseDirectState((int)gck, pressed);
                 // pass through
             }
 
             // ── 'L' keyDown (evType 10) — toggle mouse lock ────
-            if (pressed && nsVK == 37) {
+            if (gck != 0 && gck == FNKBM_KEY_FPS) {
+                if (pressed && !fnkbmRep && !isPopupVisible) fnkbmSetFpsUnlock(!g_fnkbmFpsUnlock, "key");
+                return nil;
+            }
+            if (gck != 0 && gck == FNKBM_KEY_LOCK && (!pressed || fnkbmRep)) return nil;
+            if (pressed && gck != 0 && gck == FNKBM_KEY_LOCK) {
                 if (isPopupVisible) return event;
                 isMouseLocked = !isMouseLocked;
                 if (!isMouseLocked) {
@@ -2522,8 +3777,8 @@ static void setupHIDManager() {
 
             // ── POPUP_KEY (P key, VK 35) — show/hide settings popup ──
             // Using raw NSVirtualKeyCode 35 is proven more reliable on Catalyst.
-            if (nsVK == 35) {
-                if (pressed) {
+            if (gck != 0 && gck == FNKBM_KEY_PANEL) {
+                if (pressed && !fnkbmRep) {
                     if (!popupWindow) createPopup();
                     if (isPopupVisible) {
                         popupViewController *vc = (popupViewController *)popupWindow.rootViewController;
@@ -2570,7 +3825,8 @@ static void setupHIDManager() {
             }
 
             // ── Advanced Custom Remaps (tracked state for robust KeyUp) ───
-            if (!isPopupVisible && keyCaptureCallback == nil) {
+            // Skipped when bound keys are translated in place (see the top of the file).
+            if (!g_fnkbmKeysInProcess && !isPopupVisible && keyCaptureCallback == nil) {
                 GCKeyCode target = 0;
                 GCKeyCode customTarget = (keyCode < 512) ? keyRemapArray[keyCode] : 0;
                 if (customTarget == (GCKeyCode)-1) return nil; 
@@ -2588,6 +3844,7 @@ static void setupHIDManager() {
                 if (target > 0) {
                     if (pressed) {
                         if (isMouseLocked || target >= 10000) {
+                            if (!remappedKeysState[keyCode]) KLOG("key %ld bound to key %ld: key down", (long)keyCode, (long)target);
                             _sendDualKeyEvent(target, YES);
                             remappedKeysState[keyCode] = YES;
                             return nil;
@@ -2919,6 +4176,8 @@ static void updateMouseLock(BOOL value, CGPoint warpPos) {
 
 
     if (!value) isGCMouseDirectActive = NO;
+    else if (NATIVE_ALWAYS_ON) isGCMouseDirectActive = YES;
+    KLOG("mouse lock=%d direct=%d", value, isGCMouseDirectActive);
     updateBlueDotVisibility();
 }
 
@@ -3041,8 +4300,15 @@ static void updateMouseLock(BOOL value, CGPoint warpPos) {
         currentMouse.handlerQueue = dispatch_get_main_queue();
     GCMouseMoved customHandler = [^(GCMouseInput *eventMouse, float deltaX, float deltaY) {
         if (isGCMouseDirectActive) {
-            // DIRECT MODE: Pass movement directly to the game (via framework)
-            handler(eventMouse, deltaX, deltaY);
+            if (fnkbmHidOnGCEvent(deltaX, deltaY)) return;
+            // DIRECT MODE: movement goes to the game's own mouse handler,
+            // scaled by the native sensitivity settings. Whole counts are
+            // sent and the fraction is carried, so slow moves are not lost
+            // if the engine truncates.
+            double ads = rightButtonIsPressed ? (NATIVE_ADS_SENS / 100.0) : 1.0;
+            fnkbmMouseFeed((double)deltaX * (NATIVE_SENS_X / 100.0) * ads, (double)deltaY * (NATIVE_SENS_Y / 100.0) * ads);
+            static int directCount = 0;
+            if ((++directCount % 240) == 1) KLOG("mouse move direct n=%d in=(%.1f,%.1f) ads=%d", directCount, deltaX, deltaY, rightButtonIsPressed);
             // Also ensure we don't accumulate gyro delta
             atomic_store(&mouseAccumBufferX[0], 0);
             atomic_store(&mouseAccumBufferX[1], 0);
@@ -3055,6 +4321,10 @@ static void updateMouseLock(BOOL value, CGPoint warpPos) {
             atomic_add_double(&mouseAccumBufferY[idx], (double)deltaY);
         }
     } copy];
+#ifdef FNKBM_DEBUG
+    g_dbgMouseWrapper = customHandler;
+#endif
+    KLOG("game registered mouse moved handler");
     %orig(customHandler);
 }
 %end
@@ -3098,7 +4368,8 @@ static void updateMouseLock(BOOL value, CGPoint warpPos) {
     // a keybind assigned, OR if mouse is unlocked. NSEvent monitor handles key firing.
     void (^wrappedHandler)(GCControllerDirectionPad *, float, float) =
         ^(GCControllerDirectionPad *pad, float xValue, float yValue) {
-            // Always suppress if mouse is unlocked — game should not receive scroll
+            // Unlocked: only the wheel the tweak passes on for menus gets through.
+            if (g_fnkbmMenuScroll) { handler(pad, xValue, yValue); return; }
             if (!isMouseLocked) return;
 
             // Suppress per-direction: if the direction being scrolled has a keybind,
@@ -3164,11 +4435,10 @@ static BOOL _isMouseButtonSuppressed(int code) {
     // Modulo check only for special cases likePopup UI
     if (keyRemapArray[code % 512] != 0) return YES;
 
-    // 5. Direct Mouse Toggle Override
-    // For mice that support GCInput (Direct Mode), we suppress L/R/M to prevent dual-input
-    if (isGCMouseDirectActive) {
-        if (code == MOUSE_BUTTON_LEFT || code == MOUSE_BUTTON_RIGHT || code == MOUSE_BUTTON_MIDDLE) return YES;
-    }
+    // 5. Direct (native) mouse mode: left, right and middle are NOT suppressed
+    // here. The game reads them as real mouse buttons through GameController.
+    // The matching UI click is swallowed in the event monitor instead, so the
+    // game never also sees a screen touch.
 
     // 6. Direct Mouse Toggle Key (Exclusive)
     if (code != 0 && (GCKeyCode)code == GCMOUSE_DIRECT_KEY) return YES;
@@ -3185,7 +4455,7 @@ static CGEventRef mouseButtonTapCallback(CGEventTapProxy proxy, CGEventType type
     // ── SAFETY CHECK: GLOBAL INTERFERENCE PREVENTION ──
     // Only process events if our app is actually in the foreground.
     // This prevents neutralizing Caps Lock or OtherMouse buttons for the entire OS.
-    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive || !atomic_load(&g_fnkbmRealActive)) {
         return event;
     }
 
@@ -3260,11 +4530,24 @@ static CGEventRef mouseButtonTapCallback(CGEventTapProxy proxy, CGEventType type
 
             // 1. Intercept Caps Lock (VK 57)
             int64_t vk = _CGEventGetIntegerValueField ? _CGEventGetIntegerValueField(event, 9) : 0;
+            if (type == 12 && vk == 57 && fnkbmKeyTarget(57) > 0) {
+                // Caps Lock is bound: it presses its key and no longer toggles typing mode.
+                if (fnkbmRemapActive()) fnkbmTapKey((GCKeyCode)fnkbmKeyTarget(57));
+                return NULL;
+            }
+            // Command is bound: while playing, keys pressed with it held stay plain
+            // keys. Otherwise macOS treats them as shortcuts and never reports
+            // their release, which leaves them stuck in the game.
+            // Left alone: Command+Tab (switch apps) and Command+Shift+3/4/5 (macOS screenshots).
+            BOOL fnkbmShot = (flags & kCGEventFlagMaskShift) && (vk == 20 || vk == 21 || vk == 23);
+            if ((type == 10 || type == 11) && (flags & FNKBM_CMD_MASK) && fnkbmRemapActive() && vk != 48 && !fnkbmShot) {
+                flags &= ~FNKBM_CMD_MASK;
+                _CGEventSetFlags(event, flags);
+            }
             if (type == 12 && vk == 57) {
-                isTypingModeEnabled = (flags & kCGEventFlagMaskAlphaShift) != 0;
-                // LEVEL 10: Mandatory State Flush on Mode Switch
-                resetControllerState();
-                return NULL; // CONSUME AT SYSTEM LEVEL
+                // Caps Lock does not switch typing mode (one stray press turned every bind
+                // off). It goes on to the game, which gets it as a short press.
+                return event;
             }
             
             // 2. Global Caps Lock Stripping & Lowercasing
@@ -3347,7 +4630,7 @@ static CGEventRef mouseButtonTapCallback(CGEventTapProxy proxy, CGEventType type
             }
 
             if (isGCMouseDirectActive) {
-                // Direct mode: pass through system-level mouse movement and clicks
+                // Native mode: handled from GameController, nothing to do here.
                 return event;
             }
 
@@ -3454,6 +4737,10 @@ static CGEventRef mouseButtonTapCallback(CGEventTapProxy proxy, CGEventType type
             (g_vctrlReverseMap[keyCode] || g_vctrlCustomMap[keyCode])) {
             return; // Only swallow while the virtual controller can accept this input.
         }
+        KLOG("key %ld pressed=%d remap=%ld fnremap=%ld blocked=%d", (long)keyCode, pressed,
+             (keyCode >= 0 && keyCode < 512) ? (long)keyRemapArray[keyCode] : 0L,
+             (keyCode >= 0 && keyCode < 512) ? (long)fortniteRemapArray[keyCode] : 0L,
+             (keyCode >= 0 && keyCode < 512) ? (int)fortniteBlockedDefaults[keyCode] : 0);
 
         // TWO-TIER REMAPPING SYSTEM (ULTRA-FAST):
         // PRIORITY 1: Advanced Custom Remaps - user's explicit overrides (~2ns)
@@ -3525,6 +4812,10 @@ static CGEventRef mouseButtonTapCallback(CGEventTapProxy proxy, CGEventType type
         // No remapping - call handler with original key
         handler(keyboard, key, keyCode, pressed);
     };
+#ifdef FNKBM_DEBUG
+    g_dbgKbWrapper = [customHandler copy];
+#endif
+    KLOG("game registered keyboard handler");
 
     %orig(customHandler);
 }
@@ -3601,11 +4892,28 @@ static CGEventRef mouseButtonTapCallback(CGEventTapProxy proxy, CGEventType type
     if (!handler) { %orig; return; }
     GCControllerButtonValueChangedHandler wrapper = ^(GCControllerButtonInput *btn, float val, BOOL pressed) {
         NSNumber *codeNum = objc_getAssociatedObject(btn, &kButtonCodeKey);
-        if (codeNum && _isMouseButtonSuppressed([codeNum intValue])) {
+        BOOL sup = codeNum && _isMouseButtonSuppressed([codeNum intValue]);
+        if (codeNum && pressed && fnkbmCaptureMouseButton([codeNum intValue])) return;
+        if (codeNum && NATIVE_ALWAYS_ON) {
+            if (!fnkbmNativeButton([codeNum intValue], pressed, g_fnkbmFwdPressed, YES)) return;
+            KLOG("mouse button code=%d pressed=%d sent to game", [codeNum intValue], pressed);
+            handler(btn, val, pressed);
+            return;
+        }
+        if (sup) {
              return; 
         }
         handler(btn, val, pressed);
     };
+    int mbi = fnkbmMouseButtonIndex(self);
+    if (mbi >= 0) {
+        g_fnkbmGameBtnHandler[mbi] = [handler copy];
+        g_fnkbmGameBtn[mbi] = self;
+        KLOG("game registered pressedChanged for mouse button %d", mbi);
+#ifdef FNKBM_DEBUG
+        g_dbgBtnPressed[mbi] = [wrapper copy]; g_dbgBtn[mbi] = self;
+#endif
+    }
     %orig(wrapper);
 }
 
@@ -3613,11 +4921,25 @@ static CGEventRef mouseButtonTapCallback(CGEventTapProxy proxy, CGEventType type
     if (!handler) { %orig; return; }
     GCControllerButtonValueChangedHandler wrapper = ^(GCControllerButtonInput *btn, float val, BOOL pressed) {
         NSNumber *codeNum = objc_getAssociatedObject(btn, &kButtonCodeKey);
-        if (codeNum && _isMouseButtonSuppressed([codeNum intValue])) {
+        BOOL sup = codeNum && _isMouseButtonSuppressed([codeNum intValue]);
+        if (codeNum && pressed && isPopupVisible && (mouseButtonCaptureCallback != nil || keyCaptureCallback != nil) && [codeNum intValue] != MOUSE_BUTTON_LEFT) return;
+        if (codeNum && NATIVE_ALWAYS_ON) {
+            if (!fnkbmNativeButton([codeNum intValue], pressed, g_fnkbmFwdValue, NO)) return;
+            handler(btn, val, pressed);
+            return;
+        }
+        if (sup) {
              return; 
         }
         handler(btn, val, pressed);
     };
+    int mbi = fnkbmMouseButtonIndex(self);
+    if (mbi >= 0) {
+        KLOG("game registered valueChanged for mouse button %d", mbi);
+#ifdef FNKBM_DEBUG
+        g_dbgBtnValue[mbi] = [wrapper copy]; g_dbgBtn[mbi] = self;
+#endif
+    }
     %orig(wrapper);
 }
 
@@ -3630,9 +4952,11 @@ static CGEventRef mouseButtonTapCallback(CGEventTapProxy proxy, CGEventType type
         if (_isMouseButtonSuppressed(code)) return NO;
 
         // 2. Legacy synthesis check (Fallback)
-        if (code == MOUSE_BUTTON_LEFT && leftButtonIsPressed) return NO; // Absolute block
-        if (code == MOUSE_BUTTON_RIGHT && rightButtonIsPressed) return NO;
-        if (code == MOUSE_BUTTON_MIDDLE && middleButtonIsPressed) return NO;
+        if (!isGCMouseDirectActive) {
+            if (code == MOUSE_BUTTON_LEFT && leftButtonIsPressed) return NO; // Absolute block
+            if (code == MOUSE_BUTTON_RIGHT && rightButtonIsPressed) return NO;
+            if (code == MOUSE_BUTTON_MIDDLE && middleButtonIsPressed) return NO;
+        }
     }
     return %orig;
 }
@@ -3644,9 +4968,11 @@ static CGEventRef mouseButtonTapCallback(CGEventTapProxy proxy, CGEventType type
         if (_isMouseButtonSuppressed(code)) return 0.0f;
         
         // Absolute block for synthesized states
-        if (code == MOUSE_BUTTON_LEFT && leftButtonIsPressed) return 0.0f;
-        if (code == MOUSE_BUTTON_RIGHT && rightButtonIsPressed) return 0.0f;
-        if (code == MOUSE_BUTTON_MIDDLE && middleButtonIsPressed) return 0.0f;
+        if (!isGCMouseDirectActive) {
+            if (code == MOUSE_BUTTON_LEFT && leftButtonIsPressed) return 0.0f;
+            if (code == MOUSE_BUTTON_RIGHT && rightButtonIsPressed) return 0.0f;
+            if (code == MOUSE_BUTTON_MIDDLE && middleButtonIsPressed) return 0.0f;
+        }
     }
     return %orig;
 }
@@ -3751,7 +5077,10 @@ static BOOL fnPerformResponderChangeOnMain(BOOL (^change)(void)) {
     if (duration > minDuration) {
         targetDuration = minDuration; // Dynamically bypass the engine's 60 FPS cap
     }
+    fnkbmDgHookCommandBuffer(self);
+    atomic_fetch_add(&g_dgCbPresIn, 1);
     %orig(drawable, targetDuration);
+    atomic_fetch_add(&g_dgCbPresOut, 1);
 }
 
 %end

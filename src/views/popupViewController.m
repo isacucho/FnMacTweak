@@ -1688,12 +1688,19 @@ static NSString *getKeyName(GCKeyCode keyCode) {
   // Cache Fortnite actions array for performance (created once, reused many
   // times)
   self.cachedFortniteActions = @[
+    @{@"action" : @"Forward", @"default" : @(26)},
+    @{@"action" : @"Left", @"default" : @(4)},
+    @{@"action" : @"Backward", @"default" : @(22)},
+    @{@"action" : @"Right", @"default" : @(7)},
+    @{@"action" : @"Jump", @"default" : @(44)},
     @{@"action" : @"Sprint", @"default" : @(225)},
     @{@"action" : @"Crouch", @"default" : @(224)},
     @{@"action" : @"Auto Walk", @"default" : @(46)},
     @{@"action" : @"Harvesting Tool", @"default" : @(9)},
     @{@"action" : @"Use", @"default" : @(8)},
     @{@"action" : @"Reload", @"default" : @(21)},
+    @{@"action" : @"Fire", @"default" : @(10050)},
+    @{@"action" : @"Aim", @"default" : @(10051)},
     @{@"action" : @"Weapon Slot 1", @"default" : @(30)},
     @{@"action" : @"Weapon Slot 2", @"default" : @(31)},
     @{@"action" : @"Weapon Slot 3", @"default" : @(32)},
@@ -1701,15 +1708,19 @@ static NSString *getKeyName(GCKeyCode keyCode) {
     @{@"action" : @"Weapon Slot 5", @"default" : @(34)},
     @{@"action" : @"Build", @"default" : @(20)},
     @{@"action" : @"Edit", @"default" : @(10)},
+    @{@"action" : @"Select Building Edit", @"default" : @(10050)},
+    @{@"action" : @"Reset Building Edit", @"default" : @(10051)},
     @{@"action" : @"Wall", @"default" : @(29)},
     @{@"action" : @"Floor", @"default" : @(27)},
     @{@"action" : @"Stairs", @"default" : @(6)},
     @{@"action" : @"Roof", @"default" : @(25)},
-    @{@"action" : @"Trap", @"default" : @(11)},
+    @{@"action" : @"Trap", @"default" : @(23)},
+    @{@"action" : @"Repair / Upgrade", @"default" : @(11)},
+    @{@"action" : @"Inventory", @"default" : @(43)},
     @{@"action" : @"Inventory Toggle", @"default" : @(226)},
     @{@"action" : @"Emote", @"default" : @(5)},
     @{@"action" : @"Chat", @"default" : @(40)},
-    @{@"action" : @"Push To Talk", @"default" : @(23)},
+    @{@"action" : @"Push To Talk", @"default" : @(28)},
     @{@"action" : @"Map", @"default" : @(16)},
     @{@"action" : @"Escape", @"default" : @(41)}
   ];
@@ -1866,6 +1877,7 @@ static NSString *getKeyName(GCKeyCode keyCode) {
                                action:@selector(controllerTabTapped)
                      forControlEvents:UIControlEventTouchUpInside];
   [self.segmentedContainer addSubview:self.controllerTabButton];
+  self.controllerTabButton.hidden = YES;   // keyboard and mouse build: no controller emulation tab
 
   // Key Remap Tab Button (⌨️) — position 1
   self.keyRemapTabButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -1882,7 +1894,7 @@ static NSString *getKeyName(GCKeyCode keyCode) {
 
   // Container Tab Button (🔗) — position 3
   self.containerTabButton = [UIButton buttonWithType:UIButtonTypeSystem];
-  self.containerTabButton.frame = CGRectMake(147, 0, 49, 30);
+  self.containerTabButton.frame = CGRectMake(98, 0, 49, 30);
   [self.containerTabButton setTitle:@"🔗" forState:UIControlStateNormal];
   self.containerTabButton.titleLabel.font = [UIFont systemFontOfSize:22];
   self.containerTabButton.layer.cornerRadius = 6;
@@ -1895,7 +1907,7 @@ static NSString *getKeyName(GCKeyCode keyCode) {
 
   // Quick Start Tab Button (❓) — position 4
   self.quickStartTabButton = [UIButton buttonWithType:UIButtonTypeSystem];
-  self.quickStartTabButton.frame = CGRectMake(196, 0, 49, 30);
+  self.quickStartTabButton.frame = CGRectMake(147, 0, 49, 30);
   [self.quickStartTabButton setTitle:@"❓" forState:UIControlStateNormal];
   self.quickStartTabButton.titleLabel.font = [UIFont systemFontOfSize:22];
   self.quickStartTabButton.layer.cornerRadius = 6;
@@ -1992,6 +2004,46 @@ static NSString *getKeyName(GCKeyCode keyCode) {
   descriptionLabel.numberOfLines = 2;
   [descriptionBanner addSubview:descriptionLabel];
   y += 74; // Banner height + spacing
+
+  // Native mouse sensitivity (keyboard and mouse mode). Applies as the slider moves.
+  NSArray *nativeRows = @[ @[@"Mouse X", @(NATIVE_SENS_X)], @[@"Mouse Y", @(NATIVE_SENS_Y)], @[@"While aiming", @(NATIVE_ADS_SENS)] ];
+  for (NSInteger i = 0; i < 3; i++) {
+    UILabel *nl = [[UILabel alloc] initWithFrame:CGRectMake(leftMargin, y, contentWidth, 18)];
+    nl.tag = 9201 + i;
+    nl.textColor = [UIColor whiteColor];
+    nl.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    nl.text = [NSString stringWithFormat:@"%@: %.0f%%", nativeRows[i][0], [nativeRows[i][1] floatValue]];
+    [self.sensitivityTab addSubview:nl];
+    UISlider *ns = [[UISlider alloc] initWithFrame:CGRectMake(leftMargin, y + 18, contentWidth, 28)];
+    ns.tag = 9101 + i;
+    ns.minimumValue = 10; ns.maximumValue = 400;
+    ns.value = [nativeRows[i][1] floatValue];
+    [ns addTarget:self action:@selector(nativeSensChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.sensitivityTab addSubview:ns];
+    y += 52;
+  }
+  NSArray *optRows = @[ @[@"Smooth mouse movement", @"fnkbm.mouseSmooth"], @[@"Keep running when unfocused", @"fnkbm.stayActive"] ];
+  for (NSInteger i = 0; i < (NSInteger)optRows.count; i++) {
+    UILabel *ol = [[UILabel alloc] initWithFrame:CGRectMake(leftMargin, y + 5, contentWidth - 60, 20)];
+    ol.text = optRows[i][0];
+    ol.textColor = [UIColor whiteColor];
+    ol.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    [self.sensitivityTab addSubview:ol];
+    UISwitch *os = [[UISwitch alloc] initWithFrame:CGRectMake(leftMargin + contentWidth - 51, y, 51, 31)];
+    id saved = [[NSUserDefaults standardUserDefaults] objectForKey:optRows[i][1]];
+    os.on = saved ? [saved boolValue] : YES;
+    os.tag = 9301 + i;
+    [os addTarget:self action:@selector(nativeOptionChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.sensitivityTab addSubview:os];
+    y += 36;
+  }
+  UILabel *rawNote = [[UILabel alloc] initWithFrame:CGRectMake(leftMargin, y, contentWidth, 30)];
+  rawNote.text = @"Raw mouse input: smoothing off, X and Y at 100%.";
+  rawNote.textColor = [UIColor colorWithWhite:0.7 alpha:1.0];
+  rawNote.font = [UIFont systemFontOfSize:11];
+  rawNote.numberOfLines = 2;
+  [self.sensitivityTab addSubview:rawNote];
+  y += 36;
 
   // Apply Changes button
   self.applySensitivityButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -2154,6 +2206,27 @@ static NSString *getKeyName(GCKeyCode keyCode) {
   [self updateSensitivityFieldBorders];
 }
 
+- (void)nativeOptionChanged:(UISwitch *)s {
+  NSArray *keys = @[@"fnkbm.mouseSmooth", @"fnkbm.stayActive"];
+  NSInteger i = s.tag - 9301;
+  if (i < 0 || i >= (NSInteger)keys.count) return;
+  [[NSUserDefaults standardUserDefaults] setBool:s.isOn forKey:keys[i]];
+  [[NSNotificationCenter defaultCenter] postNotificationName:@"fnkbm.optionsChanged" object:nil];
+}
+
+- (void)nativeSensChanged:(UISlider *)s {
+  float v = roundf(s.value / 5.0f) * 5.0f;   // steps of 5
+  NSMutableDictionary *n = [([[NSUserDefaults standardUserDefaults] dictionaryForKey:kNativeMouseKey] ?: @{}) mutableCopy];
+  NSArray *keys = @[@"nativeSensX", @"nativeSensY", @"nativeAdsSens"], *names = @[@"Mouse X", @"Mouse Y", @"While aiming"];
+  NSInteger i = s.tag - 9101;
+  if (i < 0 || i > 2) return;
+  n[keys[i]] = @(v);
+  [[NSUserDefaults standardUserDefaults] setObject:n forKey:kNativeMouseKey];
+  loadNativeMouseSettings();
+  UILabel *l = (UILabel *)[self.sensitivityTab viewWithTag:9201 + i];
+  l.text = [NSString stringWithFormat:@"%@: %.0f%%", names[i], v];
+}
+
 - (void)createKeyRemapTab {
   self.keyRemapTab = [[UIView alloc]
       initWithFrame:CGRectMake(0, 0, 330,
@@ -2301,56 +2374,66 @@ static NSString *getKeyName(GCKeyCode keyCode) {
     @{
       @"title" : @"MOVEMENT",
       @"binds" : @[
-        @{@"action" : @"Sprint", @"default" : @(225)},  // L Shift
-        @{@"action" : @"Crouch", @"default" : @(224)},  // L Ctrl
-        @{@"action" : @"Auto Walk", @"default" : @(46)} // =
+        @{@"action" : @"Forward", @"default" : @(26)},
+        @{@"action" : @"Left", @"default" : @(4)},
+        @{@"action" : @"Backward", @"default" : @(22)},
+        @{@"action" : @"Right", @"default" : @(7)},
+        @{@"action" : @"Jump", @"default" : @(44)},
+        @{@"action" : @"Sprint", @"default" : @(225)},
+        @{@"action" : @"Crouch", @"default" : @(224)},
+        @{@"action" : @"Auto Walk", @"default" : @(46)}
       ]
     },
     @{
       @"title" : @"COMBAT",
       @"binds" : @[
-        @{@"action" : @"Harvesting Tool", @"default" : @(9)}, // F
-        @{@"action" : @"Use", @"default" : @(8)},             // E
-        @{@"action" : @"Reload", @"default" : @(21)},         // R
-        @{@"action" : @"Weapon Slot 1", @"default" : @(30)},  // 1
-        @{@"action" : @"Weapon Slot 2", @"default" : @(31)},  // 2
-        @{@"action" : @"Weapon Slot 3", @"default" : @(32)},  // 3
-        @{@"action" : @"Weapon Slot 4", @"default" : @(33)},  // 4
-        @{@"action" : @"Weapon Slot 5", @"default" : @(34)}   // 5
+        @{@"action" : @"Harvesting Tool", @"default" : @(9)},
+        @{@"action" : @"Use", @"default" : @(8)},
+        @{@"action" : @"Reload", @"default" : @(21)},
+        @{@"action" : @"Fire", @"default" : @(10050)},
+        @{@"action" : @"Aim", @"default" : @(10051)},
+        @{@"action" : @"Weapon Slot 1", @"default" : @(30)},
+        @{@"action" : @"Weapon Slot 2", @"default" : @(31)},
+        @{@"action" : @"Weapon Slot 3", @"default" : @(32)},
+        @{@"action" : @"Weapon Slot 4", @"default" : @(33)},
+        @{@"action" : @"Weapon Slot 5", @"default" : @(34)}
       ]
     },
     @{
       @"title" : @"BUILDING",
       @"binds" : @[
-        @{@"action" : @"Build", @"default" : @(20)}, // Q
-        @{@"action" : @"Edit", @"default" : @(10)},  // G
-        @{@"action" : @"Wall", @"default" : @(29)},  // Z
-        @{@"action" : @"Floor", @"default" : @(27)}, // X
-        @{@"action" : @"Stairs", @"default" : @(6)}, // C
-        @{@"action" : @"Roof", @"default" : @(25)},   // V
-        @{@"action" : @"Trap", @"default" : @(11)}    // H
+        @{@"action" : @"Build", @"default" : @(20)},
+        @{@"action" : @"Edit", @"default" : @(10)},
+        @{@"action" : @"Select Building Edit", @"default" : @(10050)},
+        @{@"action" : @"Reset Building Edit", @"default" : @(10051)},
+        @{@"action" : @"Wall", @"default" : @(29)},
+        @{@"action" : @"Floor", @"default" : @(27)},
+        @{@"action" : @"Stairs", @"default" : @(6)},
+        @{@"action" : @"Roof", @"default" : @(25)},
+        @{@"action" : @"Trap", @"default" : @(23)},
+        @{@"action" : @"Repair / Upgrade", @"default" : @(11)}
       ]
     },
     @{
       @"title" : @"INVENTORY",
       @"binds" : @[
-        @{@"action" : @"Inventory", @"default" : @(43)},        // Tab (now remappable)
-        @{@"action" : @"Inventory Toggle", @"default" : @(226)} // L Option
+        @{@"action" : @"Inventory", @"default" : @(43)},
+        @{@"action" : @"Inventory Toggle", @"default" : @(226)}
       ]
     },
     @{
       @"title" : @"COMMUNICATION",
       @"binds" : @[
-        @{@"action" : @"Emote", @"default" : @(5)},         // B
-        @{@"action" : @"Chat", @"default" : @(40)},         // Return
-        @{@"action" : @"Push To Talk", @"default" : @(23)}  // T
+        @{@"action" : @"Emote", @"default" : @(5)},
+        @{@"action" : @"Chat", @"default" : @(40)},
+        @{@"action" : @"Push To Talk", @"default" : @(28)}
       ]
     },
     @{
       @"title" : @"NAVIGATION",
       @"binds" : @[
-        @{@"action" : @"Map", @"default" : @(16)}, // M
-        @{@"action" : @"Escape", @"default" : @(41)} // ESC
+        @{@"action" : @"Map", @"default" : @(16)},
+        @{@"action" : @"Escape", @"default" : @(41)}
       ]
     }
   ];
@@ -2815,7 +2898,7 @@ static NSString *getKeyName(GCKeyCode keyCode) {
     };
 
     keyCaptureCallback = ^(GCKeyCode kc) { 
-        if (kc == 57) { // Caps Lock
+        if (0) { // Caps Lock can be bound; typing mode has its own key
             dispatch_async(dispatch_get_main_queue(), ^{
                 __strong typeof(weakSelf) strongSelf = weakSelf;
                 if (!strongSelf) return;
@@ -3128,6 +3211,12 @@ static NSString *getKeyName(GCKeyCode keyCode) {
     self.stagedKeybinds[action] = @(newKey);
   }
 
+  // Apply at once: a bind that waits for a separate Apply press looks like
+  // a bind that did not work.
+  if (self.stagedKeybinds.count > 0) {
+    [self applyKeybindChangesTapped];
+    return;
+  }
 
   // Show/update Apply Changes button
   [self updateApplyChangesButton];
@@ -3482,6 +3571,11 @@ static NSString *getKeyName(GCKeyCode keyCode) {
     @{
       @"title" : @"MOVEMENT",
       @"binds" : @[
+        @{@"action" : @"Forward", @"default" : @(26)},
+        @{@"action" : @"Left", @"default" : @(4)},
+        @{@"action" : @"Backward", @"default" : @(22)},
+        @{@"action" : @"Right", @"default" : @(7)},
+        @{@"action" : @"Jump", @"default" : @(44)},
         @{@"action" : @"Sprint", @"default" : @(225)},
         @{@"action" : @"Crouch", @"default" : @(224)},
         @{@"action" : @"Auto Walk", @"default" : @(46)}
@@ -3493,6 +3587,8 @@ static NSString *getKeyName(GCKeyCode keyCode) {
         @{@"action" : @"Harvesting Tool", @"default" : @(9)},
         @{@"action" : @"Use", @"default" : @(8)},
         @{@"action" : @"Reload", @"default" : @(21)},
+        @{@"action" : @"Fire", @"default" : @(10050)},
+        @{@"action" : @"Aim", @"default" : @(10051)},
         @{@"action" : @"Weapon Slot 1", @"default" : @(30)},
         @{@"action" : @"Weapon Slot 2", @"default" : @(31)},
         @{@"action" : @"Weapon Slot 3", @"default" : @(32)},
@@ -3505,17 +3601,20 @@ static NSString *getKeyName(GCKeyCode keyCode) {
       @"binds" : @[
         @{@"action" : @"Build", @"default" : @(20)},
         @{@"action" : @"Edit", @"default" : @(10)},
+        @{@"action" : @"Select Building Edit", @"default" : @(10050)},
+        @{@"action" : @"Reset Building Edit", @"default" : @(10051)},
         @{@"action" : @"Wall", @"default" : @(29)},
         @{@"action" : @"Floor", @"default" : @(27)},
         @{@"action" : @"Stairs", @"default" : @(6)},
         @{@"action" : @"Roof", @"default" : @(25)},
-        @{@"action" : @"Trap", @"default" : @(11)}
+        @{@"action" : @"Trap", @"default" : @(23)},
+        @{@"action" : @"Repair / Upgrade", @"default" : @(11)}
       ]
     },
     @{
       @"title" : @"INVENTORY",
       @"binds" : @[
-        @{@"action" : @"Inventory", @"default" : @(43)}, // Tab (now remappable)
+        @{@"action" : @"Inventory", @"default" : @(43)},
         @{@"action" : @"Inventory Toggle", @"default" : @(226)}
       ]
     },
@@ -3524,14 +3623,14 @@ static NSString *getKeyName(GCKeyCode keyCode) {
       @"binds" : @[
         @{@"action" : @"Emote", @"default" : @(5)},
         @{@"action" : @"Chat", @"default" : @(40)},
-        @{@"action" : @"Push To Talk", @"default" : @(23)}
+        @{@"action" : @"Push To Talk", @"default" : @(28)}
       ]
     },
     @{
       @"title" : @"NAVIGATION",
-      @"binds" : @[ 
+      @"binds" : @[
         @{@"action" : @"Map", @"default" : @(16)},
-        @{@"action" : @"Escape", @"default" : @(41)} 
+        @{@"action" : @"Escape", @"default" : @(41)}
       ]
     }
   ];
@@ -4438,6 +4537,7 @@ static NSString *getControllerButtonName(NSInteger idx) {
 // ── UISwitch toggle — immediate, no staging ───────────────────────────────────
 - (void)controllerModeToggled:(UISwitch *)sw {
   isControllerModeEnabled = sw.isOn;
+  [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:kControllerModeKey];
   saveControllerMappings();
 }
 
@@ -4861,7 +4961,7 @@ static NSString *getControllerButtonName(NSInteger idx) {
             [strongSelf presentViewController:err animated:YES completion:nil];
             return;
           }
-          if (keyCode == 57) { // Caps Lock
+          if (0) { // Caps Lock can be bound; typing mode has its own key
             UIAlertController *err = [UIAlertController
                 alertControllerWithTitle:@"Invalid Key"
                                  message:@"Caps Lock is reserved for Typing Mode"
@@ -6221,7 +6321,7 @@ static void setShapeBorder(UIView *view, CGFloat radius, CGFloat width,
     };
 
     keyCaptureCallback = ^(GCKeyCode kc) { 
-        if (kc == 57) { // Caps Lock
+        if (0) { // Caps Lock can be bound; typing mode has its own key
             dispatch_async(dispatch_get_main_queue(), ^{
                 __strong typeof(weakSelf) strongSelf = weakSelf;
                 if (!strongSelf) return;
@@ -6394,6 +6494,10 @@ static void setShapeBorder(UIView *view, CGFloat radius, CGFloat width,
   if (vctrlRemaps) exportData[@"vctrlRemappings"] = vctrlRemaps;
 
   // Metadata
+  NSDictionary *nativeMouse = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kNativeMouseKey];
+  if (nativeMouse) exportData[@"nativeMouse"] = nativeMouse;
+  exportData[@"hotkeys"] = @{@"typing" : @(FNKBM_KEY_TYPING), @"lock" : @(FNKBM_KEY_LOCK), @"panel" : @(FNKBM_KEY_PANEL), @"fps" : @(FNKBM_KEY_FPS)};
+  exportData[@"controllerMode"] = @(isControllerModeEnabled);
   exportData[@"version"] = @"1.0";
   exportData[@"exportDate"] = [[NSDate date] description];
 
@@ -6497,7 +6601,8 @@ static void setShapeBorder(UIView *view, CGFloat radius, CGFloat width,
         NSDictionary *sensitivity = importData[@"sensitivity"];
         MACOS_TO_PC_SCALE = [sensitivity[@"scale"] floatValue] ?: 20.0f;
         GYRO_MULTIPLIER = [sensitivity[@"gyroMultiplier"] floatValue] ?: 100.0f;
-        GCMOUSE_DIRECT_KEY = (GCKeyCode)[sensitivity[@"gcmouseDirectKey"] integerValue];
+        if ([sensitivity[@"gcmouseDirectKey"] integerValue] > 0)
+          GCMOUSE_DIRECT_KEY = (GCKeyCode)[sensitivity[@"gcmouseDirectKey"] integerValue];
 
         // Recalculate and save
         recalculateSensitivities();
@@ -6525,6 +6630,34 @@ static void setShapeBorder(UIView *view, CGFloat radius, CGFloat width,
 
         [self updateSensitivityDiscardButton];
         [self updateSensitivityFieldBorders];
+      }
+
+      // Native mouse mode settings and the controller-mode switch
+      if ([importData[@"nativeMouse"] isKindOfClass:[NSDictionary class]]) {
+        [[NSUserDefaults standardUserDefaults] setObject:importData[@"nativeMouse"]
+                                                  forKey:kNativeMouseKey];
+        loadNativeMouseSettings();
+      }
+      if ([importData[@"hotkeys"] isKindOfClass:[NSDictionary class]]) {
+        [[NSUserDefaults standardUserDefaults] setObject:importData[@"hotkeys"]
+                                                  forKey:kFnKbmHotkeysKey];
+        loadNativeMouseSettings();
+      }
+      if (importData[@"stayActive"] != nil) {
+        [[NSUserDefaults standardUserDefaults] setBool:[importData[@"stayActive"] boolValue] forKey:@"fnkbm.stayActive"];
+      }
+      if (importData[@"mouseSmooth"] != nil) {
+        [[NSUserDefaults standardUserDefaults] setBool:[importData[@"mouseSmooth"] boolValue] forKey:@"fnkbm.mouseSmooth"];
+      }
+      if (importData[@"lowLatency"] != nil) {
+        [[NSUserDefaults standardUserDefaults] setBool:[importData[@"lowLatency"] boolValue] forKey:@"fnkbm.lowLatency"];
+      }
+      if (importData[@"fpsUnlock"] != nil) {
+        [[NSUserDefaults standardUserDefaults] setBool:[importData[@"fpsUnlock"] boolValue] forKey:kFnKbmFpsUnlockKey];
+      }
+      if (importData[@"controllerMode"] != nil) {
+        [[NSUserDefaults standardUserDefaults] setBool:[importData[@"controllerMode"] boolValue]
+                                                forKey:kControllerModeKey];
       }
 
       // Apply Fortnite Default Keybinds
