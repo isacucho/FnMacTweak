@@ -314,8 +314,9 @@ void recookVCtrlRemappings(void) {
 int getControllerDefaultMapping(int btnIdx) {
     switch (btnIdx) {
         case FnCtrlButtonA:        return 44;    // Spacebar
-        case FnCtrlButtonB:        return 41;    // ESC
+        case FnCtrlButtonB:        return 0;     // unmapped (was ESC; ESC now routes to Options)
         case FnCtrlButtonX:        return 21;    // R (Reload)
+        case FnCtrlOptions:        return 41;    // ESC → opens Fortnite menu (Options button)
         case FnCtrlButtonY:        return 28;    // Y
         case FnCtrlL2:             return 10051; // Right Click
         case FnCtrlR2:             return 10050; // Left Click

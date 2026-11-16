@@ -1900,7 +1900,10 @@ static void setupHIDManager() {
 
     if (_CGEventTapCreate && _CGEventTapEnable) {
         uint64_t keyboardMask = (1ULL << 10) | (1ULL << 11) | (1ULL << 12); // KeyDown, KeyUp, FlagsChanged
-        uint64_t mouseMask = (1ULL << kCGEventOtherMouseDown) | (1ULL << kCGEventOtherMouseUp) | (1ULL << kCGEventOtherMouseDragged);
+        uint64_t mouseMask = (1ULL << 5) |  // kCGEventMouseMoved
+                             (1ULL << 6) |  // kCGEventLeftMouseDragged
+                             (1ULL << 7) |  // kCGEventRightMouseDragged
+                             (1ULL << kCGEventOtherMouseDown) | (1ULL << kCGEventOtherMouseUp) | (1ULL << kCGEventOtherMouseDragged);
         CFMachPortRef eventTap = _CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
                                                   keyboardMask | mouseMask,
                                                   mouseButtonTapCallback, NULL);
