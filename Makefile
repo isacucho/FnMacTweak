@@ -22,5 +22,10 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 # This forces a native macOS signature immediately after the build,
 # bypassing the broken 'ldid' tool that exists in some Theos versions.
 after-all::
+	@echo "Patching CydiaSubstrate install name to @executable_path..."
+	@install_name_tool -change \
+		/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate \
+		'@executable_path/Frameworks/CydiaSubstrate.framework/CydiaSubstrate' \
+		$(THEOS_OBJ_DIR)/$(TWEAK_NAME).dylib
 	@echo "Applying Level 16 Pulse-Link Signature..."
 	@codesign -f -s - $(THEOS_OBJ_DIR)/$(TWEAK_NAME).dylib
