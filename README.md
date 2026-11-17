@@ -1,141 +1,63 @@
-# 🎮 FnMacTweak
+# FnMacTweak-kbm
 
-> **Play Fortnite on Mac the way it was meant to be played.**
+A Theos tweak for Fortnite iOS running on Apple Silicon Macs, using the graphics UI from **FnMac KBM Tweak v3**. Start with a Fortnite executable already patched by that version’s patcher. This project builds the replacement tweak; it does not patch the executable.
 
-FnMacTweak is a [Theos](https://theos.dev) tweak for **Fortnite iOS running on Apple Silicon Macs**. It bridges the gap between touch-only iOS input and a full PC/Console experience by synthesizing high-performance hardware inputs for the game engine.
+## Settings
 
----
+Open **FnMac → Graphics Panel** or **FnMac → Settings** in the macOS menu bar. Both open the same glass panel on the corresponding tab. Close it with its Close button, Escape, or a click outside the card. The card scales to fit smaller windows and respects Reduce Transparency and Reduce Motion.
 
-## ✨ Features (v5.0.0)
+**Graphics** retains v3’s controls and implementations:
 
-| Feature | Description |
-|---|---|
-| 🖱️ **Raw HID Mouse Pipeline** | **New in v5.0.0.** Mouse input is read directly from hardware at your mouse's native polling rate, bypassing the OS event system entirely for the lowest possible latency. |
-| 🎯 **Mouse Motion Compatibility** | Mouse aiming uses the gyro proxy only while virtual mouse input is active; native physical-controller motion passes through. |
-| ⚡ **Auto 120 FPS** | **New in v5.0.0.** Automatically corrects `GameUserSettings.ini` to enforce 120 FPS every time Fortnite rewrites the file. No more manual ini edits. |
-| 🛡️ **Stealth Suite** | **New in v5.0.0.** Full dyld image hiding, sysctl virtualization, and process introspection protection. |
-| 🌍 **EU Marketplace Support** | **New in v5.0.0.** Bypasses Epic's EU marketplace eligibility checks. |
-| 🎯 **Gyro-Mouse Proxy** | Zero-latency, demand-driven mouse synthesis via CoreMotion hooks. The smoothest aiming experience available. |
-| 🎮 **Controller Mode** | Native physical controller input with Auto/On/Off virtual-controller modes, keyboard/mouse-to-controller mappings, and **Advanced Virtual Controller Remaps**. |
-| 🖱️ **GCMouseInput Toggle** | Instant cursor lock/unlock with a dedicated key bind (Default: `` ` ``). |
-| ⌨️ **Typing Mode** | Press **Caps Lock** to instantly disable all keybinds and pass raw keyboard input to the game (for chat or searching). |
-| ⌨️ **Universal Remapping** | Map any key or mouse button to any Fortnite action or controller button with near-zero overhead. |
-| 🎨 **Graphics Unlocked** | Device spoofing for maximum graphics fidelity. |
-| 🗂️ **Live Import/Export** | Customize everything in the `P` menu and export your entire setup to JSON for backup or sharing. |
+- Starting display, automatic monitor discovery and reconnection updates, and a saved resolution for each display. Native resolution uses that display’s pixel scale.
+- Shadow detail, grass and foliage, detail at distance, water, bloom/light shafts/post effects, sky and haze, wind, sharper textures at distance, menu background blur, high-resolution textures, and full 3D resolution.
+- Deuteranope, Protanope, and Tritanope colour correction with strength 0–10, applied immediately.
+- The original always-on cosmetic budgets, texture pools, sharp menu/shop images, and Metal resource purge compatibility fix.
+- The patched game’s graphics-setting callback, explicit CVar values, high-resolution download preference, and Metal sampler mip bias. The patcher supplies the executable changes, including its anisotropic filtering and optional texture bundle changes.
 
----
+Display, resolution, and graphics switches apply after restarting Fortnite. The panel lists pending changes. V3’s `fnkbm.*` graphics preferences are preserved.
 
-## 🚀 Getting Started
+**Settings** contains:
 
-### Requirements
-- Apple Silicon Mac (M1 or later)
-- Fortnite iOS installed (via Sideloadly or similar injection method)
-- [Theos](https://theos.dev/docs/installation) (only if building from source)
+- Borderless Windowed, Unlock Frame Rate, and Run When Unfocused.
+- Separate **Settings Shortcut** and **Graphics Panel Shortcut**, plus optional **Lock / Unlock Cursor**. Click a shortcut and press a key, optionally with Shift, Control, Option, or Command. Escape cancels capture. The × beside each binding clears it. Conflicting bindings are rejected.
+- Select Fortnite Data Folder, with persistent security-scoped access for external drives. Restart after changing the folder.
 
-### Installation
-Download the latest `.deb` and inject it into your Fortnite IPA using Sideloadly (Advanced Options > Tweak Injection) or your preferred IPA patcher.
+Settings defaults to **P**; Graphics Panel and cursor locking default to **Not assigned**. A shortcut opens its tab, switches to it when another tab is open, and closes the panel when that tab is already selected. Menu-bar entries work even with every shortcut cleared. Existing lite preferences, including the Settings shortcut and folder bookmark, are retained. Settings opens once on first launch if it has not already been shown.
 
-> **Note:** A welcome popup appears on first launch. Press **"Don't Show Again"** to dismiss it. It will return automatically when you upgrade to a new version.
+The frame-rate unlock retains the Metal and Unreal pacer hooks and v3’s adaptive recovery from compositor refresh-rate locks. Fortnite’s saved PC Frame Rate Limit remains authoritative, including Unlimited. The Fortnite 43.10 renderer stall workaround and graphics CVar injection use that patched executable’s known layout.
 
-### Building from Source
-```bash
+Cursor capture follows Fortnite’s menu/gameplay state automatically. The panel and focus loss release the cursor and held keys/buttons. Unlocked menu clicks use UIKit touches; gameplay uses native mouse buttons with duplicate touches suppressed. Mouse wheel and trackpad input uses the v3 patch’s pointer-position protocol to scroll under the cursor. Physical controller input passes through.
+
+Gyro synthesis, virtual controllers, custom input remapping, HID mouse processing/smoothing, typing mode, settings import/export, and the tutorial video remain removed. Platform/device compatibility, marketplace callbacks, the availability fallback, dyld filtering, and responder threading fixes are retained.
+
+## Build and install
+
+Requirements: Xcode with an iOS SDK, Theos, and an Apple Silicon Mac.
+
+```sh
 make package FINALPACKAGE=1
 ```
-The resulting `.deb` will be in the `packages/` directory.
 
----
+The package is written to `packages/`. The library retains the name `FnMacTweak.dylib` for existing injection paths; the displayed name is **FnMacTweak-kbm**.
 
-## ⌨️ Typing Mode (Caps Lock)
+Replace the tweak in an IPA already prepared by the external v3 patcher:
 
-**Typing Mode** is designed for quick in-game communication without disrupting your setup.
-
-- **How it works**: Press **Caps Lock** at any time to toggle Typing Mode.
-- **When ON**: All custom keybinds and controller remappings are temporarily disabled. Your keyboard behaves like a standard keyboard, passing raw characters to the game.
-- **Visual Feedback**: Syncs with your keyboard's hardware Caps Lock light.
-- **Safety**: Caps Lock cannot be assigned to any other action in the settings menu, ensuring it is always available for typing.
-
----
-
-## 🎯 The Gyro-Mouse System
-
-FnMacTweak uses a **Demand-Driven Gyro Proxy** for mouse aiming while the virtual controller is ready and mouse aiming is active.
-
-The proxy answers eligible motion requests with synthesized mouse velocity. Physical controller motion retains its original implementation. The previous unscoped Unreal orientation interposition is disabled.
-
-- **Sensitivity Formula:** `(Base ÷ 100) × (Look% ÷ 100) × Scale × (Gyro Multiplier ÷ 100)`
-- **Pixel Perfection:** Sub-pixel mouse deltas are preserved and consumed at the game's polling rate.
-- **Scaling:** Match your exact PC DPI/Sensitivity feel using the `MACOS_TO_PC_SCALE` and `Gyro Multiplier` settings in the `P` menu.
-
----
-
-## 🎮 Controller Mode & Virtual Remaps
-
-The **Controller** tab has a **Virtual Controller** selector that saves immediately:
-
-- **Auto** (default): use Fortnite’s native physical controller input when another controller is connected; reconnect the virtual controller when the last physical controller disconnects.
-- **On**: keep the virtual controller connected, including alongside physical controllers. Fortnite may still choose between devices.
-- **Off**: disconnect the virtual controller and stop controller-related keyboard/mouse suppression.
-
-The status below the selector shows connection readiness or an error. Physical controller buttons, sticks, and gyro retain native input. Synthetic input and cleanup only target the tweak’s own virtual device.
-
-The mapping rows bind keyboard keys or mouse buttons to virtual controller inputs. Advanced Virtual Remaps provide additional source-to-controller bindings; these do not remap physical controller hardware. Mapping rows use **Apply Changes**, while advanced virtual remaps save immediately. Saved mappings remain available when virtual input is disabled. Older imported backups default to Auto.
-
-For physical controllers, use Auto and connect over Bluetooth or USB before launch or in the lobby. No controller power cycle should be needed; runtime compatibility still depends on Fortnite’s device handling.
-
----
-
-## ⌨️ Input Customization
-
-Press **`P`** (default) in-game to open the settings panel.
-
-- **Sensitivity Tab**: Adjust mouse look speed, gyro multipliers, and the GCMouseInput Toggle key.
-- **Keyboard Tab**: Traditional keyboard-to-game mappings (Movement, Building, etc.).
-- **Controller Tab**: Choose Auto/On/Off and manage keyboard/mouse-to-controller mappings.
-- **Container Tab**: Grant the tweak access to Fortnite's data folder for advanced features.
-- **Quick Start Tab**: Tutorials and setup guides.
-
----
-
-## 🖱️ Cursor Management
-
-| Action | Mapping | Description |
-|---|---|---|
-| 🔒 **Toggle Lock/Unlock** | Press **L** | Toggles between FPS mouse look and free cursor. |
-| 🎯 **Teleport to Blue Dot** | Hold **Option (⌥)** | Temporarily unlocks and warps the cursor to the "Blue Dot" center (for building/menus). Releasing Option relocks the mouse and warps it back to the center of the screen. |
-
-- **Blue Dot Position**: When the `P` settings panel is open, a blue dot indicator appears. Drag it to your desired position to set the teleport target.
-- The **GCMouseInput Toggle** (default: `` ` ``) is a separate dedicated key for direct in-game action passthrough.
-- The settings panel automatically releases the mouse cursor when opened.
-
----
-
-## 🗂️ Project Structure
-
-```
-FnMacTweak/
-├── src/
-│   ├── Tweak.xm              # Hook entry point (CGEventTap & HID lifecycle)
-│   ├── globals.h/m           # Global state, persistence, and suite management
-│   ├── ue_reflection.h/m     # Engine-level aim hook & Gyro-Mouse synthesis
-│   ├── PerformanceGuard.h/m  # Process performance and scheduling management
-│   ├── FnOverlayWindow.h/m   # Custom overlay for Blue Dot & UI rendering
-│   └── views/                # UI Components (Settings Popup, Welcome Screen)
-├── tools/
-│   └── ldid                  # codesign shim for reliable build signing
-├── Makefile                  # Build configuration (Theos)
-└── control                   # Package metadata
+```sh
+tools/make-ipa.sh /path/to/Fortnite_kbm.ipa .theos/obj/FnMacTweak.dylib
 ```
 
----
+The helper writes a separate `_kbm.ipa`, refuses existing output paths, and verifies the archive. It preserves the patched executable and all other IPA contents. Sign/install using your usual installer.
 
-## 🏆 Credits
+## Regression checks
 
-- **[@kohlervg](https://github.com/KohlerVG)** — v4.0.0 / v5.0.0 Architect: Raw HID Pipeline, Engine Aim Hook, Stealth Suite, UI Overhaul.
-- **[@rt2746](https://github.com/rt2746)** — Original Author.
-- **[Majkel]** — Special thanks for the virtual controller implementation idea!
+```sh
+python3 tests/graphics_backend_test.py
+python3 tests/shortcut_test.py
+python3 tests/panel_input_test.py
+clang -Wall -Wextra -Werror tests/cursor_state_test.c -o /tmp/fn-kbm-cursor-test
+/tmp/fn-kbm-cursor-test
+clang -Wall -Wextra -Werror tests/mouse_routing_test.c -o /tmp/fn-kbm-mouse-test
+/tmp/fn-kbm-mouse-test
+```
 
----
-
-## ⚖️ License
-
-See [LICENSE](LICENSE) for details. Use at your own risk.
+The Objective-C checks run the actual source functions with mocked game/device objects on macOS. They do not replace live testing of graphics output, display switching, or native input in Fortnite.

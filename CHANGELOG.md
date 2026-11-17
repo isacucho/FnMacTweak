@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## FnMacTweak-kbm — November 2026
+
+- Renamed the lite branch’s product to FnMacTweak-kbm.
+- Matched buttons, switches, sliders, and checkmarks to the macOS system accent colour, including changes while the panel is open.
+- Ported the FnMac KBM Tweak v3 glass graphics panel and its graphics, texture, display/resolution, colour correction, and supporting runtime implementations.
+- Added Graphics and Settings tabs; moved the previous lite settings into Settings.
+- Fixed stretched/clipped Settings content on opening and tab switches; both tabs use the graphics panel’s dimensions.
+- Added FnMac → Settings below Graphics Panel in the macOS menu bar.
+- Added separate, clearable Settings and Graphics Panel shortcuts. Preserved P for Settings and left Graphics Panel and cursor lock unassigned by default.
+- Preserved v3 graphics preferences and existing lite settings/bookmarks.
+- Restored native key/button cleanup and blocked game input while the panel is open; retained v3 pointer-position wheel scrolling.
+- Added v3 compositor frame-rate recovery and followed the patched game’s saved Frame Rate Limit.
+- Kept executable patching external and renamed the IPA helper’s default output to `_kbm.ipa`.
+
+## FnMacTweak-lite — November 2026
+
+- Restored a compact 330 × 400 floating settings panel with the original draggable title bar and red close control.
+- Kept folder selection/security-scoped bookmarks, borderless windowed, frame-rate unlock, background running, and platform compatibility fixes.
+- Added configurable menu shortcuts (P by default) and optional cursor locking (unassigned by default).
+- Removed gyro synthesis, virtual controllers, input remapping, HID/smoothing pipelines, input emulation, blue-dot controls, typing mode, native-KBM binary patch tooling, welcome/tutorial screens, and video playback.
+- Removed settings import/export. Legacy input settings are ignored.
+- Preserved unlocked mouse-to-touch menu clicks, native gameplay button routing, duplicate-click suppression, and matched releases when changing modes.
+- Preserved game-log-driven cursor visibility/capture for compatibility with the external native-mouse patch; settings and focus loss always release the cursor.
+- Updated the IPA helper to replace only the dylib and verify the archive.
+
 ## [5.0.0] — May 2026
 
 ### ✨ Added

@@ -4,7 +4,7 @@
 #        bash make-ipa.sh <your.ipa> [tweak.dylib]
 # Your IPA is not changed. The result is written next to it as <name>_kbm.ipa.
 set -euo pipefail
-VERSION="15 Nov, build 3 (frame rate unlocked)"
+VERSION="16 Nov (bundle9)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENTRY="Payload/FortniteClient-IOS-Shipping.app/Frameworks/FnMacTweak.dylib"
 say() { printf '\n%s\n' "$*"; }
@@ -23,7 +23,7 @@ problem() {
   fi
 }
 
-[ -f "$HERE/files/fn_kbm_patch.py" ] || stop "This folder is not complete. Download the zip again."
+[ -f "$HERE/files/fn_kbm_patch.py" ] && [ -f "$HERE/files/game-43.10.diff" ] || stop "This folder is not complete. Download the zip again."
 if ! python3 -I -c "" >/dev/null 2>&1; then
   echo
   echo "Your Mac needs Apple's developer tools first (free, from Apple)."
@@ -102,6 +102,7 @@ echo "  4. Run the FnMacAssistant patch like you normally do."
 echo "  5. Open Fortnite. If it closes, open it again a few times."
 say "In the game: binds and sensitivity are in Fortnite's own Settings."
 echo "There are no tweak keys: the cursor locks by itself in a match."
-echo "This version removes the 120 frame rate limit. Expect more heat and fan noise."
+echo "Set your frame rate in Fortnite's Video settings, Frame Rate Limit."
+echo "Unlimited means more heat and fan noise."
 echo
 [ -n "${FNKBM_NO_OPEN:-}" ] || open -R "$OUT" 2>/dev/null || true

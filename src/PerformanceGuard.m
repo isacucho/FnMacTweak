@@ -25,9 +25,9 @@
     // active, but without the extreme NSActivityLatencyCritical that can lead to 
     // hard thermal throttling on some Macs.
     self.activityToken = [[NSProcessInfo processInfo] beginActivityWithOptions:(NSActivityUserInitiated)
-                                                                       reason:@"FnMacTweak Extreme Performance Mode (L15)"];
+                                                                       reason:@"FnMacTweak-kbm game activity"];
     
-    NSLog(@"[FnMacTweak] Hyper-Performance Mode Activated (App Nap Dead)");
+    NSLog(@"[FnMacTweak] App Nap prevention enabled");
 }
 
 - (void)elevateProcessPriority {
@@ -36,7 +36,7 @@
     // background tasks but lets the OS display systems run fluidly.
     int result = setpriority(PRIO_PROCESS, 0, -10);
     if (result == 0) {
-        NSLog(@"[FnMacTweak] Process priority elevated to -20 (Dominance Mode)");
+        NSLog(@"[FnMacTweak] Process priority elevated to -10");
     } else {
         NSLog(@"[FnMacTweak] Failed to elevate priority (Error: %d). System may have restricted permissions.", errno);
     }

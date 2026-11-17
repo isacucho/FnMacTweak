@@ -1,0 +1,172 @@
+FnMac KBM Tweak: changelog
+==========================
+
+Compared with: the 15 Nov "FPS Unlock" package.
+Up to: the 16 Nov build (bundle9), which this folder now makes.
+"(untested)" means the change has not been tried in a match yet.
+
+
+FRAME RATE
+
+- Fixed: the game froze over and over with the frame rate unlocked, on loading
+  screens and when coming back from another app.
+  Cause: after each frame the renderer waits, with no time limit, for the
+  graphics card to finish the previous frame. Above 120 fps that signal sometimes
+  never came, so the game hung.
+  Fix: the tweak finds that wait from where the game's present function calls it.
+  If it lasts more than 400 ms, the tweak releases it once.
+  (First shipped in the 15 Nov FPS Unlock build. It is still in every build.)
+
+- Fortnite's own PC "Frame Rate Limit" row is now in Settings: 30, 60, 120, 144,
+  160, 165, 180, 200, 240, 360 or Unlimited. The engine follows that row.
+  Before, the limit was a fixed 1000. The game's forced 120 fps limit at start is
+  removed.
+
+- No more quality drop at high frame rates. The iPad device profile set Medium
+  quality and 50% 3D resolution whenever 120 fps mode was on. Those caps no
+  longer reach the game.
+
+- The menus now obey your Frame Rate Limit as well. In the lobby and menus the
+  game used a separate built-in front-end limit, even with "Unlimited" chosen.
+  That check is removed in the game file. (untested)
+
+- The 60 fps lock is cleared automatically.
+  Cause: sometimes macOS stops sending the game's frames straight to the screen
+  and blends the window instead. It then waits for the screen to refresh, so the
+  frame rate is held to the refresh rate (60 on a 60 Hz monitor). This happens
+  after you switch back from another app, and while a notification banner is
+  over the game.
+  - The tweak spots this in about half a second (before, 5 to 10 s).
+  - It pauses new frames for 80 ms, which sends the frames straight to the
+    screen again. The 0.5 s pause used before was a visible stutter.
+  - If 80 ms is not enough, it tries 160, 320 and then 500 ms.
+  - While a notification is on screen it does not pause, and looks again every
+    2 s.
+  - Switching back to the game always gets a new try at once. (untested)
+  Turn on a Focus mode while playing to stop banners from causing it.
+
+- Each frame's minimum time on screen now follows your Frame Rate Limit. The
+  original FnMacTweak held every frame on screen for one full refresh.
+
+- Fixed a graphics driver log flood that wasted render-thread time. The Mac
+  driver refused a "purgeable" request on every freed Metal resource and logged
+  it about 33,000 times a second. rhi.Metal.ResourcePurgeOnDelete is now 0.
+
+
+GRAPHICS
+
+- Your graphics settings are no longer pushed down to iPad levels. A game patch
+  asks the tweak before Fortnite applies any setting by name. For about 50
+  settings the tweak answers "keep the built-in value". On iOS the iPad profile
+  and quality levels set these below what the game would otherwise use.
+  The settings cover:
+  - shadows (map size and range)
+  - grass and foliage density and distance
+  - level of detail for characters and terrain
+  - water
+  - bloom, depth of field, eye adaptation and lens flares
+  - sky
+  - full-resolution ambient occlusion
+  - world loading range: 350 m for the world, 384 m for terrain
+- Five hidden PC rows are shown in Video settings: Shadows, View Distance,
+  Meshes, Effects and Post Processing.
+- Real 16x texture filtering. Earlier attempts only changed a cached copy of the
+  setting.
+- "Full 3D resolution" switch: turns off dynamic resolution, which could drop the
+  3D picture to 50%. Screen percentage is 100 at every frame rate mode.
+- Resolution, start display and colour blind mode: see GRAPHICS PANEL below.
+
+
+SKINS AND TEXTURE STREAMING
+
+- Higher limits for other players' cosmetics, so more skins, gliders, pickaxes
+  and wraps load around you. The iPad profile sets these limits low. Always on.
+- No fixed 400 MB texture pool, so more textures stay loaded. Always on.
+- A 1000 MB texture pool in the lobby (the iPad profile sets 500). Always on.
+- "Sharper textures at distance" switch: sharper texture filtering (mip bias
+  -0.5), one more texture level loaded, and faster texture loading
+  (r.Streaming.Boost 2).
+- "High-resolution textures" switch:
+  - Turns on Fortnite's PC settings for high-resolution texture levels
+    (Fort.EnableHighResMips, r.Streaming.UseAllMips, bAllowDownloadHighResMips).
+  - A game patch stops the iOS build from skipping its optional high-resolution
+    bundles. They are now registered. (untested: whether they download)
+- Bigger on-demand download caches, for the "TooMuchInUse" error when skins load.
+  (untested)
+
+
+GRAPHICS PANEL, DISPLAYS AND SAVED SETTINGS
+
+Open it from the Mac menu bar: FnMac, Graphics Panel. Close it with its Close
+button, Esc, or a click outside it. While it is open the game gets no keys,
+clicks or wheel.
+
+- Every choice in the panel is saved and kept when Fortnite restarts.
+  Resolution, start display and the graphics switches apply at the next start.
+  The bottom of the panel turns amber and lists what needs a restart.
+- Displays are found automatically. Each connected display gets its own
+  resolution list (Native, then standard widths below native) and keeps its own
+  choice. The list updates when a display is plugged in or removed.
+  (plugging in while the game runs: untested)
+- Resolution choice: the game renders at the width you pick, for example a sharp
+  1920 picture on a high-resolution screen. Native uses the display's own pixel
+  scale.
+- Start display: "Main display" follows the macOS main display (System Settings,
+  Displays), or you pick one display. The game opens in full screen there. If
+  the chosen display is not connected, the built-in display is used.
+- Colour blind mode: Deuteranope, Protanope or Tritanope, strength 0-10, applied
+  at once. Fortnite's own colour blind rows are disabled on iOS, so the tweak
+  adds a colour filter to the game's picture instead.
+- Graphics switches: Shadow detail, Grass and foliage, Detail at distance,
+  Water, Bloom/light shafts/post effects, Sky and haze, Wind, Sharper textures
+  at distance, Menu background blur, High-resolution textures and Full 3D
+  resolution.
+
+
+KEYBOARD, MOUSE AND CONTROLLER
+
+- Fixed movement: keys getting stuck, for example walking on by itself.
+  - Each key release is matched to its key press.
+  - Every 50 ms the tweak compares the keys it has passed on with the real
+    keyboard.
+  - All keys are let go when you switch apps, open a menu or open the panel.
+  - A release that arrives while the game briefly shows its cursor is sent again.
+- Fixed: left click stuck while shooting. Every 50 ms the tweak checks the real
+  mouse buttons. If a button is up but Fortnite never got the release, the tweak
+  sends it.
+  This also covers:
+  - side buttons
+  - F-keys and the keypad
+  - mouse buttons bound to keys, and keys bound to mouse buttons
+- The mouse wheel and trackpad scroll menus right after launch, and they scroll what
+  is under the pointer.
+  Cause: until your first match the game ignores the mouse. It ignored wheel input,
+  and its own cursor never moved, so a wheel step went to whatever sat under that
+  stale cursor spot: menus scrolled once or not at all.
+  Fix: a game patch lets wheel steps through in menus, and each step now carries the
+  pointer's position, so the game scrolls the list under the pointer.
+  - Mouse wheel: one step per notch.
+  - Trackpad: one step per 10 points of movement, momentum included.
+  - Every connected mouse and trackpad is treated the same.
+- In a match, a trackpad swipe gives one wheel step per 10 points instead of one per
+  tiny event. (untested)
+- Short mouse key names in the HUD and in Keyboard Controls: MWU, MWD, MMB, M4,
+  M5 (was "Mouse Wheel Up" and so on). The HUD is cleaner.
+- Fixed: the game switching from the PC interface to the mobile (touch)
+  interface. A game patch makes its "platform supports touch" check answer no,
+  so Fortnite can no longer fall back to touch controls.
+- When the cursor locks, it is moved to the middle of the game if it sat outside
+  it or near its edge. The cursor no longer locks while another app is in front.
+- Smoother switching between controller and keyboard and mouse. (untested)
+  - The tweak no longer sends its reset input to a real controller.
+  - While you use a controller, small mouse movement is ignored, so a bumped
+    mouse does not flip the HUD.
+  - A real mouse movement (30 points within 150 ms) switches back to keyboard
+    and mouse at once.
+
+
+STILL INCLUDED FROM EARLIER PACKAGES
+
+- Smooth mouse movement: movement is released evenly between mouse reports.
+- Fortnite keeps running and stays connected when you switch to another app.
+- Mac screenshots (Command + Shift + 3, 4, 5) work in a match.

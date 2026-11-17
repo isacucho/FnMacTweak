@@ -1,8 +1,8 @@
 Package: com.yourcompany.fnmactweak
-Name: FnMacTweak
+Name: FnMacTweak-kbm
 Version: 6.0.0
 Architecture: iphoneos-arm
-Description: FnMacTweak (Fortnite Mac Tweak)
+Description: Fortnite Mac native KBM compatibility, graphics panel and settings
 Author: KohlerVG
 Section: Tweaks
 Depends: mobilesubstrate (>= 0.9.5000)
